@@ -16,7 +16,7 @@ RUN go build -a -ldflags="-w -s" -o /app/whatsapp
 #############################
 FROM alpine:3.23
 RUN apk add --no-cache ffmpeg libwebp-tools tzdata
-ENV TZ=UTC
+ENV TZ=Asia/Singapore
 WORKDIR /app
 # Copy compiled from builder.
 COPY --from=builder /app/whatsapp /app/whatsapp
