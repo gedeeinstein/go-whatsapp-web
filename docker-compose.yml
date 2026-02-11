@@ -1,0 +1,23 @@
+services:
+  whatsapp_go:
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "20"
+    build:
+      context: .
+      dockerfile: ./docker/golang.Dockerfile
+    container_name: kapitmas_whatsapp_go
+    restart: "on-failure"
+    ports:
+      - "3003:3003"
+    networks:
+      - go_kapitmas
+    env_file:
+      - src/.env
+    volumes:
+      - ./whatsapp_data:/app/storages
+networks:
+  go_kapitmas:
+    driver: bridge
