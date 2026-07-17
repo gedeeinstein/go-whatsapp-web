@@ -1,57 +1,51 @@
-# infrastructure/whatsapp
+# WHATSAPP INFRASTRUCTURE
 
-WhatsApp protocol integration layer using whatsmeow. Handles device management, event processing, chat storage wrappers, and webhook forwarding.
+Generated: 2026-06-06
 
-## STRUCTURE
-```
-whatsapp/
-├── device_manager.go      # DeviceManager: multi-device lifecycle (602 lines)
-├── device_instance.go     # DeviceInstance: ID()/JID() + client wrapper
-├── event_handler.go       # Central event dispatcher (switch on event type)
-├── event_message.go       # Message event → storage + webhook
-├── event_archive.go       # Archive event → local DB update
-├── event_receipt.go       # Read receipts
-├── event_call.go          # Call events
-├── event_delete.go        # Message deletion events
-├── event_group.go         # Group info changes
-├── event_newsletter.go    # Newsletter events
-├── history_sync.go        # WhatsApp history sync to local DB
-├── chatstorage_wrapper.go # deviceChatStorage: injects device_id into all repo calls
-├── jid_utils.go           # NormalizeJIDFromLID: @lid → @s.whatsapp.net
-├── webhook.go             # Webhook dispatch
-├── webhook_forward.go     # Forward events to external webhooks
-├── client_lifecycle.go    # Connect/disconnect/reconnect logic
-├── context_device.go      # Context helpers for device resolution
-├── auto_reply.go          # Auto-reply message handling
-├── cleanup.go             # Resource cleanup
-├── database.go            # DB connection setup
-├── init.go                # Package initialization
-└── logger.go              # Custom whatsmeow logger adapter
-```
+## OVERVIEW
 
-## CRITICAL PATTERNS
+This package owns whatsmeow clients, multi-device lifecycle, JID normalization, events, send retry helpers,
+presence pulse scheduling, webhook forwarding, and the event-side chatstorage wrapper.
 
-### JID Normalization
-WhatsApp uses LID JIDs (`@lid`) internally. **Always** normalize before DB lookups:
-```go
-normalizedJID := NormalizeJIDFromLID(ctx, evt.JID, client)
-jidStr := normalizedJID.String()
-```
+## WHERE TO LOOK
 
-### Device ID for DB Lookups
-DB stores device_id as JID without device number. Use `client.Store.ID.ToNonAD().String()` — **never** `instance.ID()` for chat storage queries:
-```go
-deviceID := client.Store.ID.ToNonAD().String()  // "6289605618749@s.whatsapp.net"
-// NOT instance.ID() which returns "6289605618749:11@s.whatsapp.net"
-```
+| Task | Location | Notes |
+|------|----------|-------|
+| Device lifecycle | `device_manager.go`, `device_instance.go`, `client_lifecycle.go` | Create/load/purge/reconnect and persisted registry behavior. |
+| Event routing | `event_handler.go`, `event_*.go` | Add new event types to the central switch. |
+| Message webhooks | `event_message.go`, `webhook_forward.go` | Payload construction, media fields, signatures, event filters. |
+| Chatwoot forward retry | `webhook_forward.go` | Queue-backed retries for WhatsApp-to-Chatwoot forward failures. |
+| Send retry / 463 | `send_retry.go`, `key_cache.go` | Reachout timelock retry and privacy-token store wiring. |
+| Presence behavior | `event_handler.go`, `event_chat_presence.go`, `presence_pulse.go` | Connect-time presence, chat presence webhooks, scheduled daily pulses. |
+| History import | `history_sync.go` | Stores chats/messages for history sync batches. |
+| JID conversion | `jid_utils.go`, `context_device.go` | LID normalization and request/device context. |
+| Storage wrapper | `chatstorage_wrapper.go` | Injects device ID into chat/message repository operations. |
 
-### Event Handler Pattern
-All event handlers follow: `func handleX(ctx, evt, chatStorageRepo, client)` → normalize JIDs → lookup/update DB → forward to webhook.
+## CONVENTIONS
 
-### Wrapper Pattern
-`deviceChatStorage` / `DeviceRepository` wrap all `IChatStorageRepository` calls to inject device_id automatically. New interface methods must be added to BOTH wrappers.
+- `DeviceManager` keys the active registry by requested device ID or alias, but logged-in storage identity may become the WhatsApp JID.
+- Chat/message table `device_id` should be the WhatsApp JID without device number: `client.Store.ID.ToNonAD().String()`.
+- Event handlers call `ContextWithDevice(ctx, instance)` before downstream logic.
+- Presence pulse only targets connected and logged-in devices, then returns them to unavailable after the configured duration.
+- Normalize `@lid` JIDs with `NormalizeJIDFromLID(ctx, jid, client)` before DB lookup/storage when a phone JID is needed.
+- Use `ToNonAD()` when persisting or emitting stable non-device JIDs.
+- Webhook forwarding uses goroutines and bounded contexts in selected handlers; keep failures logged without blocking the event loop.
+- `StartChatwootForwardRetryWorker` persists retry jobs in chat storage; queued events need stable `device_id`, event name, and WhatsApp message ID.
+- `chatstorage_wrapper.go` should provide device defaults for scoped repository methods, including message edit and device-scoped ID lookups.
 
 ## ANTI-PATTERNS
-- **Never** use raw JID from events for DB queries without `NormalizeJIDFromLID`
-- **Never** add interface methods without updating `chatstorage_wrapper.go` and `device_repository.go`
-- **Never** use `instance.ID()` for chat storage — use `client.Store.ID.ToNonAD().String()`
+
+- Do not store `instance.ID()` as chat/message `device_id` after a real WhatsApp JID is available.
+- Do not bypass `chatstorage_wrapper.go` for event-side chat/message access.
+- Do not add an `IChatStorageRepository` method without implementing the wrapper method.
+- Do not remove the receipt `Device == 0` filter; linked devices produce duplicate receipts.
+- Do not start a second presence pulse loop; `cmd/helpers.go` uses `sync.Once` for process-wide startup.
+- Do not move privacy tokens to a volatile keys DB; long-lived sessions need them in durable primary WhatsApp storage.
+- Do not assume `client`, `client.Store`, or `client.Store.LIDs` is non-nil during LID resolution.
+- Do not replay Chatwoot forward events without device scoping; the retry queue uniqueness depends on it.
+
+## TESTING
+
+- Tests in this package often exercise unexported helpers directly from package `whatsapp`.
+- Webhook tests replace package-level functions/globals and restore them with `defer`; preserve cleanup on new tests.
+- Presence pulse tests use fake clients, injected clocks/sleeps, channels, and timeouts; avoid `t.Parallel` around shared scheduler state.
