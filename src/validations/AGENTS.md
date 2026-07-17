@@ -1,22 +1,34 @@
-# validations
+# VALIDATIONS
 
-Input validation using `ozzo-validation`. Each domain has a `*_validation.go` + `*_validation_test.go` pair.
+Generated: 2026-06-06
 
-## PATTERN
-```go
-func ValidateXxx(ctx context.Context, request *domain.XxxRequest) error {
-    return validation.ValidateStruct(request,
-        validation.Field(&request.Field, validation.Required, ...),
-    )
-}
-```
+## OVERVIEW
+
+Validation functions enforce request shape before usecases touch whatsmeow, storage, or media helpers.
+
+## WHERE TO LOOK
+
+| Task | Location | Notes |
+|------|----------|-------|
+| Send validation | `send_validation.go` | Phone format, file-vs-URL, MIME, max sizes, duration, mentions, poll options. |
+| Reply message fields | `send_validation.go`, `send_validation_test.go` | `reply_message_id` is optional; tests cover pass-through for text/media requests. |
+| Chat validation | `chat_validation.go` | Mutates request defaults for limit/offset before validating. |
+| Group validation | `group_validation.go` | Uses whatsmeow participant action constants. |
+| Message validation | `message_validation.go` | Watch boolean `Required` behavior. |
+| Tests | `*_test.go` | Table-driven, expected error equality or substring checks. |
 
 ## CONVENTIONS
-- Validation functions are standalone (not methods) for easy testing
-- Test files use table-driven tests with `testify/assert`
-- `send_validation.go` (516 lines) is the largest — validates all message types
-- Context parameter is required even if unused (for future device-scoped validation)
+
+- Use `validation.ValidateStructWithContext(ctx, &request, validation.Field(...))`.
+- Wrap ozzo errors as `pkgError.ValidationError(err.Error())`.
+- Add custom checks after ozzo validation for cross-field rules and domain-specific formats.
+- Phone numbers must be international format; Indonesian local `08...` should fail.
+- `@everyone` is a special mention and bypasses phone validation.
+- Multipart tests usually construct `multipart.FileHeader` with a `Content-Type` header directly.
+- Max-size checks must read from `config.WhatsappSettingMax*`, not duplicated literals.
 
 ## ANTI-PATTERNS
-- Never validate in usecase or handler — always in this package
-- Never skip writing tests for new validation functions
+
+- Do not use `validation.Required` on a plain `bool` when `false` is valid; use a pointer or explicit validation pattern.
+- Do not accept both file and URL for request types that require exactly one input.
+- Do not make optional metadata like `reply_message_id` required unless the API contract changes.
