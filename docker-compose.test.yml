@@ -3,7 +3,7 @@ services:
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
+        max-size: "20m"
         max-file: "20"
     build:
       context: .
@@ -11,18 +11,13 @@ services:
     container_name: kapitmas_whatsapp_go
     restart: "on-failure"
     ports:
-      - "3003:3000"
+      - "${PORT:-3003}:${PORT:-3003}"
     networks:
       - go_kapitmas
     env_file:
       - src/.env
     volumes:
-      #- ./whatsapp_data:/app/storages
-      # Persist WhatsApp + chat DBs; entrypoint chowns for gowauser (uid 20001, gid 20000) on start.
-      - ./storages:/app/storages
-      - ./statics:/app/statics
-    # volumes:
-    #   - ./whatsapp_data:/app/storages
+      - ./whatsapp_data:/app/storages
 networks:
   go_kapitmas:
     driver: bridge
