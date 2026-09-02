@@ -17,6 +17,7 @@ services:
     env_file:
       - src/.env
     volumes:
+      #- ./whatsapp_data:/app/storages
       # Persist WhatsApp + chat DBs; entrypoint chowns for gowauser (uid 20001, gid 20000) on start.
       - ./storages:/app/storages
       - ./statics:/app/statics
