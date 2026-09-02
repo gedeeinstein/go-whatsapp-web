@@ -5,6 +5,7 @@ import (
 	"time"
 
 	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
@@ -40,6 +41,14 @@ func (r *deviceChatStorage) CreateMessage(ctx context.Context, evt *events.Messa
 	return r.base.CreateMessage(ctx, evt)
 }
 
+func (r *deviceChatStorage) CreateReaction(ctx context.Context, evt *events.Message) error {
+	return r.base.CreateReaction(ctx, evt)
+}
+
+func (r *deviceChatStorage) CreateIncomingCallRecord(ctx context.Context, evt *events.CallOffer, autoRejected bool) error {
+	return r.base.CreateIncomingCallRecord(ctx, evt, autoRejected)
+}
+
 func (r *deviceChatStorage) StoreChat(chat *domainChatStorage.Chat) error {
 	return r.base.StoreChat(r.withDeviceChat(chat))
 }
@@ -71,12 +80,35 @@ func (r *deviceChatStorage) StoreMessage(message *domainChatStorage.Message) err
 	return r.base.StoreMessage(message)
 }
 
+func (r *deviceChatStorage) StoreMessageEdit(edit *domainChatStorage.MessageEdit) error {
+	if edit != nil && edit.DeviceID == "" {
+		edit.DeviceID = r.deviceID
+	}
+	return r.base.StoreMessageEdit(edit)
+}
+
 func (r *deviceChatStorage) StoreMessagesBatch(messages []*domainChatStorage.Message) error {
 	return r.base.StoreMessagesBatch(messages)
 }
 
 func (r *deviceChatStorage) GetMessageByID(id string) (*domainChatStorage.Message, error) {
 	return r.base.GetMessageByID(id)
+}
+
+func (r *deviceChatStorage) GetMessageByIDAndDevice(deviceID, id string) (*domainChatStorage.Message, error) {
+	targetDeviceID := deviceID
+	if targetDeviceID == "" {
+		targetDeviceID = r.deviceID
+	}
+	return r.base.GetMessageByIDAndDevice(targetDeviceID, id)
+}
+
+func (r *deviceChatStorage) GetMessageEdits(originalMessageID, deviceID string) ([]*domainChatStorage.MessageEdit, error) {
+	targetDeviceID := deviceID
+	if targetDeviceID == "" {
+		targetDeviceID = r.deviceID
+	}
+	return r.base.GetMessageEdits(originalMessageID, targetDeviceID)
 }
 
 func (r *deviceChatStorage) GetMessages(filter *domainChatStorage.MessageFilter) ([]*domainChatStorage.Message, error) {
@@ -102,8 +134,109 @@ func (r *deviceChatStorage) DeleteMessageByDevice(deviceID, id, chatJID string) 
 	return r.base.DeleteMessageByDevice(deviceID, id, chatJID)
 }
 
-func (r *deviceChatStorage) StoreSentMessageWithContext(ctx context.Context, messageID string, senderJID string, recipientJID string, content string, timestamp time.Time) error {
-	return r.base.StoreSentMessageWithContext(ctx, messageID, senderJID, recipientJID, content, timestamp)
+func (r *deviceChatStorage) UpsertChatwootMessageLink(link *domainChatStorage.ChatwootMessageLink) error {
+	if link != nil && link.DeviceID == "" {
+		link.DeviceID = r.deviceID
+	}
+	return r.base.UpsertChatwootMessageLink(link)
+}
+
+func (r *deviceChatStorage) GetChatwootMessageLinkByWhatsAppID(deviceID, waMessageID string) (*domainChatStorage.ChatwootMessageLink, error) {
+	targetDeviceID := deviceID
+	if targetDeviceID == "" {
+		targetDeviceID = r.deviceID
+	}
+	return r.base.GetChatwootMessageLinkByWhatsAppID(targetDeviceID, waMessageID)
+}
+
+func (r *deviceChatStorage) GetChatwootMessageLinkByChatwootID(deviceID string, chatwootMessageID int) (*domainChatStorage.ChatwootMessageLink, error) {
+	targetDeviceID := deviceID
+	if targetDeviceID == "" {
+		targetDeviceID = r.deviceID
+	}
+	return r.base.GetChatwootMessageLinkByChatwootID(targetDeviceID, chatwootMessageID)
+}
+
+func (r *deviceChatStorage) GetLatestChatwootMessageLinkByConversation(conversationID, accountID int, allowLegacyZero bool, configID int64) (*domainChatStorage.ChatwootMessageLink, error) {
+	return r.base.GetLatestChatwootMessageLinkByConversation(conversationID, accountID, allowLegacyZero, configID)
+}
+
+func (r *deviceChatStorage) BackfillChatwootMessageLinkAccount(accountID int) (int64, error) {
+	return r.base.BackfillChatwootMessageLinkAccount(accountID)
+}
+
+func (r *deviceChatStorage) CountChatwootMessageLinksByConfig(configID int64) (int, error) {
+	return r.base.CountChatwootMessageLinksByConfig(configID)
+}
+
+func (r *deviceChatStorage) DeleteChatwootMessageLinksByConfig(configID int64) error {
+	return r.base.DeleteChatwootMessageLinksByConfig(configID)
+}
+
+func (r *deviceChatStorage) SaveChatwootDeviceConfig(cfg *domainChatStorage.ChatwootDeviceConfig) error {
+	return r.base.SaveChatwootDeviceConfig(cfg)
+}
+
+func (r *deviceChatStorage) UpdateChatwootDeviceConfigJID(deviceID, deviceJID string) (bool, error) {
+	return r.base.UpdateChatwootDeviceConfigJID(deviceID, deviceJID)
+}
+
+func (r *deviceChatStorage) GetChatwootDeviceConfig(deviceID string) (*domainChatStorage.ChatwootDeviceConfig, error) {
+	return r.base.GetChatwootDeviceConfig(deviceID)
+}
+
+func (r *deviceChatStorage) GetChatwootDeviceConfigByIdentifier(identifier string) (*domainChatStorage.ChatwootDeviceConfig, error) {
+	return r.base.GetChatwootDeviceConfigByIdentifier(identifier)
+}
+
+func (r *deviceChatStorage) GetChatwootDeviceConfigByInbox(accountID, inboxID int) (*domainChatStorage.ChatwootDeviceConfig, error) {
+	return r.base.GetChatwootDeviceConfigByInbox(accountID, inboxID)
+}
+
+func (r *deviceChatStorage) ListChatwootDeviceConfigs() ([]*domainChatStorage.ChatwootDeviceConfig, error) {
+	return r.base.ListChatwootDeviceConfigs()
+}
+
+func (r *deviceChatStorage) DeleteChatwootDeviceConfig(deviceID string) error {
+	return r.base.DeleteChatwootDeviceConfig(deviceID)
+}
+
+func (r *deviceChatStorage) CountChatwootDeviceConfigs() (int, error) {
+	return r.base.CountChatwootDeviceConfigs()
+}
+
+func (r *deviceChatStorage) GetLatestUnreadChatwootMessageLinkByChat(deviceID, waChatJID string) (*domainChatStorage.ChatwootMessageLink, error) {
+	targetDeviceID := deviceID
+	if targetDeviceID == "" {
+		targetDeviceID = r.deviceID
+	}
+	return r.base.GetLatestUnreadChatwootMessageLinkByChat(targetDeviceID, waChatJID)
+}
+
+func (r *deviceChatStorage) EnqueueChatwootForwardEvent(event *domainChatStorage.ChatwootForwardEvent) error {
+	if event != nil && event.DeviceID == "" {
+		event.DeviceID = r.deviceID
+	}
+	return r.base.EnqueueChatwootForwardEvent(event)
+}
+
+func (r *deviceChatStorage) ListDueChatwootForwardEvents(now time.Time, limit int) ([]*domainChatStorage.ChatwootForwardEvent, error) {
+	return r.base.ListDueChatwootForwardEvents(now, limit)
+}
+
+func (r *deviceChatStorage) MarkChatwootForwardEventFailed(id int64, lastError string, nextAttemptAt time.Time) error {
+	return r.base.MarkChatwootForwardEventFailed(id, lastError, nextAttemptAt)
+}
+
+func (r *deviceChatStorage) MarkChatwootForwardEventDone(id int64) error {
+	return r.base.MarkChatwootForwardEventDone(id)
+}
+
+func (r *deviceChatStorage) StoreSentMessageWithContext(ctx context.Context, messageID string, senderJID string, recipientJID string, content string, timestamp time.Time, msg *waE2E.Message) error {
+	if _, ok := DeviceFromContext(ctx); !ok && r.deviceID != "" {
+		ctx = ContextWithDevice(ctx, NewDeviceInstance(r.deviceID, nil, nil))
+	}
+	return r.base.StoreSentMessageWithContext(ctx, messageID, senderJID, recipientJID, content, timestamp, msg)
 }
 
 func (r *deviceChatStorage) GetChatMessageCount(chatJID string) (int64, error) {
@@ -120,6 +253,13 @@ func (r *deviceChatStorage) GetTotalMessageCount() (int64, error) {
 
 func (r *deviceChatStorage) GetTotalChatCount() (int64, error) {
 	return r.base.GetTotalChatCount()
+}
+
+func (r *deviceChatStorage) GetFilteredChatCount(filter *domainChatStorage.ChatFilter) (int64, error) {
+	if filter != nil && filter.DeviceID == "" {
+		filter.DeviceID = r.deviceID
+	}
+	return r.base.GetFilteredChatCount(filter)
 }
 
 func (r *deviceChatStorage) GetChatNameWithPushName(jid types.JID, chatJID string, senderUser string, pushName string) string {
@@ -165,10 +305,40 @@ func (r *deviceChatStorage) ListDeviceRecords() ([]*domainChatStorage.DeviceReco
 	return r.base.ListDeviceRecords()
 }
 
+// GetDeviceRecord delegates to the base repository.
 func (r *deviceChatStorage) GetDeviceRecord(deviceID string) (*domainChatStorage.DeviceRecord, error) {
 	return r.base.GetDeviceRecord(deviceID)
 }
 
+// GetDeviceRecordByJID fetches a device record by its JID.
+func (r *deviceChatStorage) GetDeviceRecordByJID(jid string) (*domainChatStorage.DeviceRecord, error) {
+	return r.base.GetDeviceRecordByJID(jid)
+}
+
+// DeleteDeviceRecord delegates to the base repository.
 func (r *deviceChatStorage) DeleteDeviceRecord(deviceID string) error {
 	return r.base.DeleteDeviceRecord(deviceID)
+}
+
+// SetDeviceWebhookURL sets or clears the webhook URL for a device.
+// Pass a nil webhookURL to clear the device-specific webhook (falls back to global).
+// Pass a non-nil string pointer to set a device-specific webhook override.
+func (r *deviceChatStorage) SetDeviceWebhookURL(deviceID string, webhookURL *string) error {
+	return r.base.SetDeviceWebhookURL(deviceID, webhookURL)
+}
+
+// GetDeviceWebhookURL retrieves the configured webhook URL for a device.
+// Returns nil if no device-specific webhook is set (caller should use global).
+func (r *deviceChatStorage) GetDeviceWebhookURL(deviceID string) (*string, error) {
+	return r.base.GetDeviceWebhookURL(deviceID)
+}
+
+// SetDeviceWebhookConfig sets the complete webhook configuration for a device.
+func (r *deviceChatStorage) SetDeviceWebhookConfig(deviceID string, config *domainChatStorage.DeviceWebhookConfig) error {
+	return r.base.SetDeviceWebhookConfig(deviceID, config)
+}
+
+// GetDeviceWebhookConfig retrieves the complete webhook configuration for a device.
+func (r *deviceChatStorage) GetDeviceWebhookConfig(deviceID string) (*domainChatStorage.DeviceWebhookConfig, error) {
+	return r.base.GetDeviceWebhookConfig(deviceID)
 }

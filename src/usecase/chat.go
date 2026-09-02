@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	domainChat "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chat"
@@ -25,6 +26,33 @@ func NewChatService(chatStorageRepo domainChatStorage.IChatStorageRepository) do
 	}
 }
 
+// chatDisplayName returns a human-readable name for a chat, falling back to a
+// JID-derived label when the stored name is empty. Some chats are persisted
+// before a pushname/group subject is known (or with stale empty names), which
+// otherwise surfaces as a blank "name" in the chat list and makes the sender
+// impossible to identify (issue #675). The fallback mirrors the storage-layer
+// convention in GetChatNameWithPushName: "Status" for status@broadcast, phone
+// number for 1:1, "Group <id>" / "Newsletter <id>" for those address spaces.
+func chatDisplayName(jid, name string) string {
+	if name != "" {
+		return name
+	}
+	// Mirror the storage-layer contract (GetChatNameWithPushNameByDevice):
+	// status@broadcast is always titled "Status", never its lowercase JID local part.
+	if jid == "status@broadcast" {
+		return "Status"
+	}
+	user := utils.ExtractPhoneFromJID(jid)
+	switch {
+	case utils.IsGroupJID(jid):
+		return "Group " + user
+	case strings.HasSuffix(jid, "@newsletter"):
+		return "Newsletter " + user
+	default:
+		return user
+	}
+}
+
 func (service serviceChat) ListChats(ctx context.Context, request domainChat.ListChatsRequest) (response domainChat.ListChatsResponse, err error) {
 	if err = validations.ValidateListChats(ctx, &request); err != nil {
 		return response, err
@@ -37,6 +65,7 @@ func (service serviceChat) ListChats(ctx context.Context, request domainChat.Lis
 		Offset:     request.Offset,
 		SearchName: request.Search,
 		HasMedia:   request.HasMedia,
+		IsArchived: request.Archived,
 	}
 
 	// Get chats from storage
@@ -46,8 +75,8 @@ func (service serviceChat) ListChats(ctx context.Context, request domainChat.Lis
 		return response, err
 	}
 
-	// Get total count for pagination
-	totalCount, err := service.chatStorageRepo.GetTotalChatCount()
+	// Get total count for pagination (with same filters for accuracy)
+	totalCount, err := service.chatStorageRepo.GetFilteredChatCount(filter)
 	if err != nil {
 		logrus.WithError(err).Error("Failed to get total chat count")
 		// Continue with partial data
@@ -59,11 +88,12 @@ func (service serviceChat) ListChats(ctx context.Context, request domainChat.Lis
 	for _, chat := range chats {
 		chatInfo := domainChat.ChatInfo{
 			JID:                 chat.JID,
-			Name:                chat.Name,
+			Name:                chatDisplayName(chat.JID, chat.Name),
 			LastMessageTime:     chat.LastMessageTime.Format(time.RFC3339),
 			EphemeralExpiration: chat.EphemeralExpiration,
 			CreatedAt:           chat.CreatedAt.Format(time.RFC3339),
 			UpdatedAt:           chat.UpdatedAt.Format(time.RFC3339),
+			Archived:            chat.Archived,
 		}
 		chatInfos = append(chatInfos, chatInfo)
 	}
@@ -97,13 +127,30 @@ func (service serviceChat) GetChatMessages(ctx context.Context, request domainCh
 		return response, fmt.Errorf("device identification required")
 	}
 
-	chat, err := service.chatStorageRepo.GetChat(request.ChatJID)
+	chat, err := service.chatStorageRepo.GetChatByDevice(deviceID, request.ChatJID)
 	if err != nil {
 		logrus.WithError(err).WithField("chat_jid", request.ChatJID).Error("Failed to get chat info")
 		return response, err
 	}
 	if chat == nil {
-		return response, fmt.Errorf("chat with JID %s not found", request.ChatJID)
+		// The chat row has not been persisted for this device yet — e.g. a
+		// conversation that has only just started, or messages received
+		// before the chat record was upserted. Returning an error here makes
+		// the endpoint respond with HTTP 500 for what is really an empty
+		// chat, so callers that poll a not-yet-stored conversation get a
+		// hard failure instead of an empty list. Treat it as "no messages
+		// yet" and return a valid empty response instead.
+		response.Data = make([]domainChat.MessageInfo, 0)
+		response.Pagination = domainChat.PaginationResponse{
+			Limit:  request.Limit,
+			Offset: request.Offset,
+			Total:  0,
+		}
+		response.ChatInfo = domainChat.ChatInfo{
+			JID:  request.ChatJID,
+			Name: chatDisplayName(request.ChatJID, ""),
+		}
+		return response, nil
 	}
 
 	// Create message filter from request
@@ -163,18 +210,30 @@ func (service serviceChat) GetChatMessages(ctx context.Context, request domainCh
 	messageInfos := make([]domainChat.MessageInfo, 0, len(messages))
 	for _, message := range messages {
 		messageInfo := domainChat.MessageInfo{
-			ID:         message.ID,
-			ChatJID:    message.ChatJID,
-			SenderJID:  message.Sender,
-			Content:    message.Content,
-			Timestamp:  message.Timestamp.Format(time.RFC3339),
-			IsFromMe:   message.IsFromMe,
-			MediaType:  message.MediaType,
-			Filename:   message.Filename,
-			URL:        message.URL,
-			FileLength: message.FileLength,
-			CreatedAt:  message.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:  message.UpdatedAt.Format(time.RFC3339),
+			ID:           message.ID,
+			ChatJID:      message.ChatJID,
+			SenderJID:    message.Sender,
+			Content:      message.Content,
+			Timestamp:    message.Timestamp.Format(time.RFC3339),
+			IsFromMe:     message.IsFromMe,
+			MediaType:    message.MediaType,
+			CallMetadata: message.CallMetadata,
+			Filename:     message.Filename,
+			URL:          message.URL,
+			FileLength:   message.FileLength,
+			CreatedAt:    message.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:    message.UpdatedAt.Format(time.RFC3339),
+		}
+		if len(message.Reactions) > 0 {
+			messageInfo.Reactions = make([]domainChat.ReactionInfo, 0, len(message.Reactions))
+			for _, reaction := range message.Reactions {
+				messageInfo.Reactions = append(messageInfo.Reactions, domainChat.ReactionInfo{
+					Emoji:     reaction.Emoji,
+					SenderJID: reaction.ReactorJID,
+					IsFromMe:  reaction.IsFromMe,
+					Timestamp: reaction.Timestamp.Format(time.RFC3339),
+				})
+			}
 		}
 		messageInfos = append(messageInfos, messageInfo)
 	}
@@ -182,11 +241,12 @@ func (service serviceChat) GetChatMessages(ctx context.Context, request domainCh
 	// Create chat info for response
 	chatInfo := domainChat.ChatInfo{
 		JID:                 chat.JID,
-		Name:                chat.Name,
+		Name:                chatDisplayName(chat.JID, chat.Name),
 		LastMessageTime:     chat.LastMessageTime.Format(time.RFC3339),
 		EphemeralExpiration: chat.EphemeralExpiration,
 		CreatedAt:           chat.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:           chat.UpdatedAt.Format(time.RFC3339),
+		Archived:            chat.Archived,
 	}
 
 	// Create pagination response
@@ -293,7 +353,7 @@ func (service serviceChat) SetDisappearingTimer(ctx context.Context, request dom
 	}
 
 	// Update local storage immediately for consistency
-	if existingChat, _ := service.chatStorageRepo.GetChat(request.ChatJID); existingChat != nil {
+	if existingChat, _ := service.chatStorageRepo.GetChatByDevice(deviceIDFromContext(ctx), request.ChatJID); existingChat != nil {
 		existingChat.EphemeralExpiration = request.TimerSeconds
 		_ = service.chatStorageRepo.StoreChat(existingChat)
 	}
@@ -354,6 +414,12 @@ func (service serviceChat) ArchiveChat(ctx context.Context, request domainChat.A
 		response.Message = "Chat archived successfully"
 	} else {
 		response.Message = "Chat unarchived successfully"
+	}
+
+	// Update local storage immediately for consistency
+	if existingChat, _ := service.chatStorageRepo.GetChatByDevice(deviceIDFromContext(ctx), request.ChatJID); existingChat != nil {
+		existingChat.Archived = request.Archived
+		_ = service.chatStorageRepo.StoreChat(existingChat)
 	}
 
 	logrus.WithFields(logrus.Fields{

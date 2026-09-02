@@ -1,1 +1,0 @@
-Use Github CLI to update the release note description. you have to follow previouse release note style.

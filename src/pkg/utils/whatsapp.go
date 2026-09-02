@@ -5,8 +5,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"mime"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,8 +20,10 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
+	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
 	pkgError "github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/error"
 	"go.mau.fi/whatsmeow"
 )
@@ -56,14 +60,90 @@ func resolveKnownDocumentExtension(mimeType string) (string, bool) {
 	return ext, ok
 }
 
+// ExtractPhoneFromVCard returns the first phone number found in a vCard's TEL field.
+func ExtractPhoneFromVCard(vcard string) string {
+	if vcard == "" {
+		return ""
+	}
+
+	normalized := strings.ReplaceAll(vcard, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+
+	var lines []string
+	var current strings.Builder
+	for _, rawLine := range strings.Split(normalized, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(rawLine, " ") || strings.HasPrefix(rawLine, "\t") {
+			if current.Len() > 0 {
+				current.WriteString(line)
+			}
+			continue
+		}
+		if current.Len() > 0 {
+			lines = append(lines, current.String())
+			current.Reset()
+		}
+		current.WriteString(line)
+	}
+	if current.Len() > 0 {
+		lines = append(lines, current.String())
+	}
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToUpper(line), "TEL") {
+			if idx := strings.LastIndex(line, ":"); idx >= 0 {
+				return strings.TrimSpace(line[idx+1:])
+			}
+		}
+	}
+	return ""
+}
+
+// FormatLocationSummary builds a one-liner for an incoming location or live-location pin.
+// The maps link is always included so content is never empty for coordinate-only pins.
+// name and address are optional prefixes.
+func FormatLocationSummary(name, address string, lat, long float64) string {
+	var parts []string
+	if n := strings.TrimSpace(name); n != "" {
+		parts = append(parts, n)
+	}
+	if a := strings.TrimSpace(address); a != "" {
+		parts = append(parts, a)
+	}
+	mapsLink := fmt.Sprintf("https://maps.google.com/?q=%g,%g", lat, long)
+	parts = append(parts, mapsLink)
+	return strings.Join(parts, " — ")
+}
+
+// FormatContactSummary builds a one-liner for a shared contact card.
+// Pass plural=true for ContactsArrayMessage to use the "Contacts" prefix.
+func FormatContactSummary(name, phone string, plural bool) string {
+	name = strings.TrimSpace(name)
+	phone = strings.TrimSpace(phone)
+
+	prefix := "Contact"
+	if plural {
+		prefix = "Contacts"
+	}
+	switch {
+	case name != "" && phone != "":
+		return fmt.Sprintf("%s: %s (%s)", prefix, name, phone)
+	case name != "":
+		return prefix + ": " + name
+	case phone != "":
+		return prefix + ": " + phone
+	default:
+		return prefix + " shared"
+	}
+}
+
 // KnownDocumentMIMEByExtension returns a known MIME type for a given Office document extension.
 func KnownDocumentMIMEByExtension(ext string) (string, bool) {
 	return resolveKnownDocumentMIME(ext)
-}
-
-// KnownDocumentExtensionByMIME returns a known Office document extension for a given MIME type.
-func KnownDocumentExtensionByMIME(mimeType string) (string, bool) {
-	return resolveKnownDocumentExtension(mimeType)
 }
 
 func determineMediaExtension(originalFilename, mimeType string) string {
@@ -71,6 +151,10 @@ func determineMediaExtension(originalFilename, mimeType string) string {
 		if ext := filepath.Ext(originalFilename); ext != "" {
 			return ext
 		}
+	}
+
+	if idx := strings.Index(mimeType, ";"); idx >= 0 {
+		mimeType = strings.TrimSpace(mimeType[:idx])
 	}
 
 	if ext, ok := resolveKnownDocumentExtension(mimeType); ok {
@@ -101,7 +185,14 @@ func ExtractMessageTextFromProto(msg *waE2E.Message) string {
 
 	// Check for extended text message (with link preview, etc.)
 	if extendedText := msg.GetExtendedTextMessage(); extendedText != nil {
-		return extendedText.GetText()
+		if t := extendedText.GetText(); t != "" {
+			return t
+		}
+		// Fall back to the matched URL text when the text field is empty
+		// (e.g., pure link-preview messages with no accompanying caption).
+		if m := extendedText.GetMatchedText(); m != "" {
+			return m
+		}
 	}
 
 	// Check for image with caption
@@ -134,6 +225,30 @@ func ExtractMessageTextFromProto(msg *waE2E.Message) string {
 		return templateButtonReply.GetSelectedDisplayText()
 	}
 
+	// Check for shared contact card
+	if contact := msg.GetContactMessage(); contact != nil {
+		return FormatContactSummary(contact.GetDisplayName(), ExtractPhoneFromVCard(contact.GetVcard()), false)
+	}
+
+	// Check for shared multiple contact cards
+	if contactsArray := msg.GetContactsArrayMessage(); contactsArray != nil {
+		if contacts := contactsArray.GetContacts(); len(contacts) > 0 && contacts[0] != nil {
+			first := contacts[0]
+			return FormatContactSummary(first.GetDisplayName(), ExtractPhoneFromVCard(first.GetVcard()), true)
+		}
+		return "Contacts shared"
+	}
+
+	// Check for location pin
+	if loc := msg.GetLocationMessage(); loc != nil {
+		return FormatLocationSummary(loc.GetName(), loc.GetAddress(), loc.GetDegreesLatitude(), loc.GetDegreesLongitude())
+	}
+
+	// Check for live location
+	if live := msg.GetLiveLocationMessage(); live != nil {
+		return FormatLocationSummary(live.GetCaption(), "", live.GetDegreesLatitude(), live.GetDegreesLongitude())
+	}
+
 	return ""
 }
 
@@ -157,131 +272,17 @@ func ExtractMediaCaption(msg *waE2E.Message) string {
 	return ""
 }
 
-// ExtractMessageTextFromEvent extracts text content from a WhatsApp event message with emojis
-func ExtractMessageTextFromEvent(evt *events.Message) string {
-	messageText := evt.Message.GetConversation()
-	if extendedText := evt.Message.GetExtendedTextMessage(); extendedText != nil {
-		messageText = extendedText.GetText()
-	} else if protocolMessage := evt.Message.GetProtocolMessage(); protocolMessage != nil {
-		if editedMessage := protocolMessage.GetEditedMessage(); editedMessage != nil {
-			if extendedText := editedMessage.GetExtendedTextMessage(); extendedText != nil {
-				messageText = extendedText.GetText()
-			}
-		}
-	} else if imageMessage := evt.Message.GetImageMessage(); imageMessage != nil {
-		messageText = imageMessage.GetCaption()
-		if messageText == "" {
-			messageText = "🖼️ Image"
-		} else {
-			messageText = "🖼️ " + messageText
-		}
-	} else if documentMessage := evt.Message.GetDocumentMessage(); documentMessage != nil {
-		messageText = documentMessage.GetCaption()
-		if messageText == "" {
-			messageText = "📄 Document"
-		} else {
-			messageText = "📄 " + messageText
-		}
-	} else if videoMessage := evt.Message.GetVideoMessage(); videoMessage != nil {
-		messageText = videoMessage.GetCaption()
-		if messageText == "" {
-			messageText = "🎥 Video"
-		} else {
-			messageText = "🎥 " + messageText
-		}
-	} else if liveLocationMessage := evt.Message.GetLiveLocationMessage(); liveLocationMessage != nil {
-		messageText = liveLocationMessage.GetCaption()
-		if messageText == "" {
-			messageText = "📍 Live Location"
-		} else {
-			messageText = "📍 " + messageText
-		}
-	} else if locationMessage := evt.Message.GetLocationMessage(); locationMessage != nil {
-		messageText = locationMessage.GetName()
-		if messageText == "" {
-			messageText = "📍 Location"
-		} else {
-			messageText = "📍 " + messageText
-		}
-	} else if stickerMessage := evt.Message.GetStickerMessage(); stickerMessage != nil {
-		messageText = "🎨 Sticker"
-		if stickerMessage.GetIsAnimated() {
-			messageText = "✨ Animated Sticker"
-		}
-		if stickerMessage.GetAccessibilityLabel() != "" {
-			messageText += " - " + stickerMessage.GetAccessibilityLabel()
-		}
-	} else if contactMessage := evt.Message.GetContactMessage(); contactMessage != nil {
-		messageText = contactMessage.GetDisplayName()
-		if messageText == "" {
-			messageText = "👤 Contact"
-		} else {
-			messageText = "👤 " + messageText
-		}
-	} else if listMessage := evt.Message.GetListMessage(); listMessage != nil {
-		messageText = listMessage.GetTitle()
-		if messageText == "" {
-			messageText = "📝 List"
-		} else {
-			messageText = "📝 " + messageText
-		}
-	} else if orderMessage := evt.Message.GetOrderMessage(); orderMessage != nil {
-		messageText = orderMessage.GetOrderTitle()
-		if messageText == "" {
-			messageText = "🛍️ Order"
-		} else {
-			messageText = "🛍️ " + messageText
-		}
-	} else if paymentMessage := evt.Message.GetPaymentInviteMessage(); paymentMessage != nil {
-		messageText = paymentMessage.GetServiceType().String()
-		if messageText == "" {
-			messageText = "💳 Payment"
-		} else {
-			messageText = "💳 " + messageText
-		}
-	} else if audioMessage := evt.Message.GetAudioMessage(); audioMessage != nil {
-		messageText = "🎧 Audio"
-		if audioMessage.GetPTT() {
-			messageText = "🎤 Voice Message"
-		}
-	} else if pollMessageV3 := evt.Message.GetPollCreationMessageV3(); pollMessageV3 != nil {
-		messageText = pollMessageV3.GetName()
-		if messageText == "" {
-			messageText = "📊 Poll"
-		} else {
-			messageText = "📊 " + messageText
-		}
-	} else if pollMessageV4 := evt.Message.GetPollCreationMessageV4(); pollMessageV4 != nil {
-		if pollMessage := pollMessageV4.GetMessage(); pollMessage != nil {
-			messageText = pollMessage.GetConversation()
-		}
-		if messageText == "" {
-			messageText = "📊 Poll"
-		} else {
-			messageText = "📊 " + messageText
-		}
-	} else if pollMessageV5 := evt.Message.GetPollCreationMessageV5(); pollMessageV5 != nil {
-		messageText = pollMessageV5.GetName()
-		if messageText == "" {
-			messageText = "📊 Poll"
-		} else {
-			messageText = "📊 " + messageText
-		}
-	}
-	return messageText
-}
-
 // ExtractMediaInfo extracts media information from a WhatsApp message
-func ExtractMediaInfo(msg *waE2E.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+func ExtractMediaInfo(msg *waE2E.Message) (mediaType string, filename string, mediaURL string, directPath string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
-		return "", "", "", nil, nil, nil, 0
+		return "", "", "", "", nil, nil, nil, 0
 	}
 
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
 		filename = GenerateMediaFilename("image", "jpg", img.GetCaption())
 		return "image", filename,
-			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(),
+			img.GetURL(), img.GetDirectPath(), img.GetMediaKey(), img.GetFileSHA256(),
 			img.GetFileEncSHA256(), img.GetFileLength()
 	}
 
@@ -289,7 +290,7 @@ func ExtractMediaInfo(msg *waE2E.Message) (mediaType string, filename string, ur
 	if vid := msg.GetVideoMessage(); vid != nil {
 		filename = GenerateMediaFilename("video", "mp4", vid.GetCaption())
 		return "video", filename,
-			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(),
+			vid.GetURL(), vid.GetDirectPath(), vid.GetMediaKey(), vid.GetFileSHA256(),
 			vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
 
@@ -297,7 +298,7 @@ func ExtractMediaInfo(msg *waE2E.Message) (mediaType string, filename string, ur
 	if ptv := msg.GetPtvMessage(); ptv != nil {
 		filename = GenerateMediaFilename("video_note", "mp4", ptv.GetCaption())
 		return "video_note", filename,
-			ptv.GetURL(), ptv.GetMediaKey(), ptv.GetFileSHA256(),
+			ptv.GetURL(), ptv.GetDirectPath(), ptv.GetMediaKey(), ptv.GetFileSHA256(),
 			ptv.GetFileEncSHA256(), ptv.GetFileLength()
 	}
 
@@ -309,7 +310,7 @@ func ExtractMediaInfo(msg *waE2E.Message) (mediaType string, filename string, ur
 		}
 		filename = GenerateMediaFilename("audio", extension, "")
 		return "audio", filename,
-			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(),
+			aud.GetURL(), aud.GetDirectPath(), aud.GetMediaKey(), aud.GetFileSHA256(),
 			aud.GetFileEncSHA256(), aud.GetFileLength()
 	}
 
@@ -320,7 +321,7 @@ func ExtractMediaInfo(msg *waE2E.Message) (mediaType string, filename string, ur
 			filename = GenerateMediaFilename("document", "", doc.GetTitle())
 		}
 		return "document", filename,
-			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(),
+			doc.GetURL(), doc.GetDirectPath(), doc.GetMediaKey(), doc.GetFileSHA256(),
 			doc.GetFileEncSHA256(), doc.GetFileLength()
 	}
 
@@ -328,129 +329,402 @@ func ExtractMediaInfo(msg *waE2E.Message) (mediaType string, filename string, ur
 	if sticker := msg.GetStickerMessage(); sticker != nil {
 		filename = GenerateMediaFilename("sticker", "webp", "")
 		return "sticker", filename,
-			sticker.GetURL(), sticker.GetMediaKey(), sticker.GetFileSHA256(),
+			sticker.GetURL(), sticker.GetDirectPath(), sticker.GetMediaKey(), sticker.GetFileSHA256(),
 			sticker.GetFileEncSHA256(), sticker.GetFileLength()
 	}
 
-	return "", "", "", nil, nil, nil, 0
+	return "", "", "", "", nil, nil, nil, 0
+}
+
+// ResolveMediaDirectPath returns storedDirectPath, or derives a direct path
+// from legacy rows that only persisted the full WhatsApp media URL.
+func ResolveMediaDirectPath(storedDirectPath, mediaURL string) string {
+	storedDirectPath = strings.TrimSpace(storedDirectPath)
+	if storedDirectPath != "" {
+		return storedDirectPath
+	}
+
+	mediaURL = strings.TrimSpace(mediaURL)
+	if mediaURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(mediaURL)
+	if err != nil {
+		return ""
+	}
+	requestURI := parsed.RequestURI()
+	if strings.HasPrefix(requestURI, "/") {
+		return requestURI
+	}
+	return ""
+}
+
+// ErrUnsupportedForwardType is returned when a stored message cannot be rebuilt for forward-by-ID.
+const ErrUnsupportedForwardType = "unsupported message type for forward"
+
+// ForwardBuildOptions controls proto rebuild for forward-by-ID sends.
+type ForwardBuildOptions struct {
+	Duration *int
+	Upload   *whatsmeow.UploadResponse
+	MimeType string
+}
+
+var forwardableMediaTypes = map[string]struct{}{
+	"image":      {},
+	"video":      {},
+	"video_note": {},
+	"audio":      {},
+	"ptt":        {},
+	"document":   {},
+	"sticker":    {},
+}
+
+// IsForwardableStorageMessage reports whether a stored row can be forwarded by ID.
+func IsForwardableStorageMessage(message *domainChatStorage.Message) bool {
+	if message == nil {
+		return false
+	}
+	if message.MediaType == "call" {
+		return false
+	}
+	if _, ok := forwardableMediaTypes[message.MediaType]; ok {
+		return true
+	}
+	if message.MediaType != "" {
+		return false
+	}
+	if strings.TrimSpace(message.Content) == "" {
+		return false
+	}
+	return !isUnsupportedTextForwardContent(message.Content)
+}
+
+func isUnsupportedTextForwardContent(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if strings.HasPrefix(trimmed, "Contact:") || strings.HasPrefix(trimmed, "Contacts:") {
+		return true
+	}
+	if strings.Contains(trimmed, "https://maps.google.com/?q=") {
+		return true
+	}
+	return false
+}
+
+// IsForwardMediaMessage reports whether the stored row represents forwardable media (not plain text).
+func IsForwardMediaMessage(message *domainChatStorage.Message) bool {
+	if message == nil {
+		return false
+	}
+	_, ok := forwardableMediaTypes[message.MediaType]
+	return ok
+}
+
+func newForwardContextInfo(duration *int) *waE2E.ContextInfo {
+	ci := &waE2E.ContextInfo{
+		IsForwarded:     proto.Bool(true),
+		ForwardingScore: proto.Uint32(100),
+	}
+	if duration != nil && *duration > 0 {
+		ci.Expiration = proto.Uint32(uint32(*duration))
+	}
+	return ci
+}
+
+// defaultForwardMimeType returns a mime type for stored media whose original
+// mime type was not persisted. WhatsApp transcodes media to fixed formats, so
+// per-type defaults are accurate except for documents, which are derived from
+// the stored filename.
+func defaultForwardMimeType(message *domainChatStorage.Message) string {
+	switch message.MediaType {
+	case "image":
+		return "image/jpeg"
+	case "video", "video_note":
+		return "video/mp4"
+	case "ptt":
+		return "audio/ogg; codecs=opus"
+	case "audio":
+		return "audio/mpeg"
+	case "sticker":
+		return "image/webp"
+	case "document":
+		ext := strings.ToLower(filepath.Ext(message.Filename))
+		if mimeType, ok := knownDocumentMIMEByExtension[ext]; ok {
+			return mimeType
+		}
+		if mimeType := mime.TypeByExtension(ext); mimeType != "" {
+			return mimeType
+		}
+		return "application/octet-stream"
+	default:
+		return ""
+	}
+}
+
+// BuildForwardMessageFromStorage rebuilds a sendable WhatsApp proto from chat storage.
+func BuildForwardMessageFromStorage(message *domainChatStorage.Message, opts ForwardBuildOptions) (*waE2E.Message, error) {
+	if message == nil {
+		return nil, fmt.Errorf("message is nil")
+	}
+	if !IsForwardableStorageMessage(message) {
+		return nil, errors.New(ErrUnsupportedForwardType)
+	}
+
+	contextInfo := newForwardContextInfo(opts.Duration)
+
+	if message.MediaType == "" {
+		return &waE2E.Message{
+			ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+				Text:        proto.String(message.Content),
+				ContextInfo: contextInfo,
+			},
+		}, nil
+	}
+
+	var (
+		mediaURL       string
+		directPath     string
+		mediaKey       []byte
+		fileSHA256     []byte
+		fileEncSHA256  []byte
+		fileLength     uint64
+	)
+
+	if opts.Upload != nil {
+		mediaURL = opts.Upload.URL
+		directPath = opts.Upload.DirectPath
+		mediaKey = opts.Upload.MediaKey
+		fileSHA256 = opts.Upload.FileSHA256
+		fileEncSHA256 = opts.Upload.FileEncSHA256
+		fileLength = opts.Upload.FileLength
+	} else {
+		mediaURL = message.URL
+		directPath = ResolveMediaDirectPath(message.DirectPath, message.URL)
+		mediaKey = message.MediaKey
+		fileSHA256 = message.FileSHA256
+		fileEncSHA256 = message.FileEncSHA256
+		fileLength = message.FileLength
+		if directPath == "" && mediaURL == "" {
+			return nil, fmt.Errorf("message %s has no media references", message.ID)
+		}
+	}
+
+	caption := message.Content
+	filename := message.Filename
+
+	mimeType := opts.MimeType
+	if mimeType == "" {
+		mimeType = defaultForwardMimeType(message)
+	}
+
+	switch message.MediaType {
+	case "image":
+		img := &waE2E.ImageMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(directPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+			Caption:       proto.String(caption),
+			ContextInfo:   contextInfo,
+		}
+		if mimeType != "" {
+			img.Mimetype = proto.String(mimeType)
+		}
+		return &waE2E.Message{ImageMessage: img}, nil
+	case "video":
+		vid := &waE2E.VideoMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(directPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+			Caption:       proto.String(caption),
+			ContextInfo:   contextInfo,
+		}
+		if mimeType != "" {
+			vid.Mimetype = proto.String(mimeType)
+		}
+		return &waE2E.Message{VideoMessage: vid}, nil
+	case "video_note":
+		ptv := &waE2E.VideoMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(directPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+			Caption:       proto.String(caption),
+			ContextInfo:   contextInfo,
+		}
+		if mimeType != "" {
+			ptv.Mimetype = proto.String(mimeType)
+		}
+		return &waE2E.Message{PtvMessage: ptv}, nil
+	case "audio", "ptt":
+		aud := &waE2E.AudioMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(directPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+			ContextInfo:   contextInfo,
+		}
+		if message.MediaType == "ptt" {
+			aud.PTT = proto.Bool(true)
+		}
+		if mimeType != "" {
+			aud.Mimetype = proto.String(mimeType)
+		}
+		return &waE2E.Message{AudioMessage: aud}, nil
+	case "document":
+		doc := &waE2E.DocumentMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(directPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+			FileName:      proto.String(filename),
+			Caption:       proto.String(caption),
+			ContextInfo:   contextInfo,
+		}
+		if mimeType != "" {
+			doc.Mimetype = proto.String(mimeType)
+		}
+		return &waE2E.Message{DocumentMessage: doc}, nil
+	case "sticker":
+		sticker := &waE2E.StickerMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(directPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+			ContextInfo:   contextInfo,
+		}
+		if mimeType != "" {
+			sticker.Mimetype = proto.String(mimeType)
+		}
+		return &waE2E.Message{StickerMessage: sticker}, nil
+	default:
+		return nil, errors.New(ErrUnsupportedForwardType)
+	}
+}
+
+// BuildDownloadableMessage reconstructs a whatsmeow downloadable media proto
+// from stored chat media metadata.
+func BuildDownloadableMessage(mediaType, mediaURL, directPath, filename string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) (whatsmeow.DownloadableMessage, error) {
+	resolvedDirectPath := ResolveMediaDirectPath(directPath, mediaURL)
+
+	switch mediaType {
+	case "image":
+		return &waE2E.ImageMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(resolvedDirectPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+		}, nil
+	case "video", "video_note":
+		return &waE2E.VideoMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(resolvedDirectPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+		}, nil
+	case "audio", "ptt":
+		return &waE2E.AudioMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(resolvedDirectPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+		}, nil
+	case "document":
+		return &waE2E.DocumentMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(resolvedDirectPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+			FileName:      proto.String(filename),
+		}, nil
+	case "sticker":
+		return &waE2E.StickerMessage{
+			URL:           proto.String(mediaURL),
+			DirectPath:    proto.String(resolvedDirectPath),
+			MediaKey:      mediaKey,
+			FileSHA256:    fileSHA256,
+			FileEncSHA256: fileEncSHA256,
+			FileLength:    proto.Uint64(fileLength),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported media type: %s", mediaType)
+	}
+}
+
+// ExtractContextInfo returns the ContextInfo from whichever message sub-type
+// is present. Returns nil when the message has no ContextInfo.
+func ExtractContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
+	if msg == nil {
+		return nil
+	}
+	switch {
+	case msg.GetExtendedTextMessage() != nil:
+		return msg.GetExtendedTextMessage().GetContextInfo()
+	case msg.GetImageMessage() != nil:
+		return msg.GetImageMessage().GetContextInfo()
+	case msg.GetVideoMessage() != nil:
+		return msg.GetVideoMessage().GetContextInfo()
+	case msg.GetAudioMessage() != nil:
+		return msg.GetAudioMessage().GetContextInfo()
+	case msg.GetDocumentMessage() != nil:
+		return msg.GetDocumentMessage().GetContextInfo()
+	case msg.GetStickerMessage() != nil:
+		return msg.GetStickerMessage().GetContextInfo()
+	case msg.GetContactMessage() != nil:
+		return msg.GetContactMessage().GetContextInfo()
+	case msg.GetLocationMessage() != nil:
+		return msg.GetLocationMessage().GetContextInfo()
+	case msg.GetPtvMessage() != nil:
+		return msg.GetPtvMessage().GetContextInfo()
+	case msg.GetLiveLocationMessage() != nil:
+		return msg.GetLiveLocationMessage().GetContextInfo()
+	}
+	return nil
 }
 
 // ExtractEphemeralExpiration extracts ephemeral expiration from a WhatsApp message
 func ExtractEphemeralExpiration(msg *waE2E.Message) uint32 {
-	logrus.Debug("ExtractEphemeralExpiration: Starting extraction process")
-
 	if msg == nil {
-		logrus.Debug("ExtractEphemeralExpiration: Message is nil, returning 0")
 		return 0
 	}
 
-	logrus.Debug("ExtractEphemeralExpiration: Message is valid, checking message types")
-
-	// Check extended text message
-	logrus.Debug("ExtractEphemeralExpiration: Checking for extended text message")
-	if extendedText := msg.GetExtendedTextMessage(); extendedText != nil {
-		logrus.Debug("ExtractEphemeralExpiration: Extended text message found, checking context info")
-		if contextInfo := extendedText.GetContextInfo(); contextInfo != nil {
-			expiration := contextInfo.GetExpiration()
-			logrus.WithField("expiration", expiration).Debug("ExtractEphemeralExpiration: Found expiration in extended text message")
-			return expiration
+	if ci := ExtractContextInfo(msg); ci != nil {
+		if exp := ci.GetExpiration(); exp != 0 {
+			return exp
 		}
-		logrus.Debug("ExtractEphemeralExpiration: Extended text message has no context info")
-	} else {
-		logrus.Debug("ExtractEphemeralExpiration: No extended text message found")
 	}
 
-	// Check regular conversation message
-	logrus.Debug("ExtractEphemeralExpiration: Checking for regular conversation message")
-	if msg.GetConversation() != "" {
-		logrus.Debug("ExtractEphemeralExpiration: Regular conversation message found, but no context info available for this type")
-		// Regular text messages might have context info too
-		// This would need to be checked based on the actual protobuf structure
-	} else {
-		logrus.Debug("ExtractEphemeralExpiration: No regular conversation message found")
-	}
-
-	// Check image message
-	logrus.Debug("ExtractEphemeralExpiration: Checking for image message")
-	if img := msg.GetImageMessage(); img != nil {
-		logrus.Debug("ExtractEphemeralExpiration: Image message found, checking context info")
-		if contextInfo := img.GetContextInfo(); contextInfo != nil {
-			expiration := contextInfo.GetExpiration()
-			logrus.WithField("expiration", expiration).Debug("ExtractEphemeralExpiration: Found expiration in image message")
-			return expiration
+	if pm := msg.GetProtocolMessage(); pm != nil {
+		if exp := pm.GetEphemeralExpiration(); exp != 0 {
+			return exp
 		}
-		logrus.Debug("ExtractEphemeralExpiration: Image message has no context info")
-	} else {
-		logrus.Debug("ExtractEphemeralExpiration: No image message found")
 	}
 
-	// Check video message
-	logrus.Debug("ExtractEphemeralExpiration: Checking for video message")
-	if vid := msg.GetVideoMessage(); vid != nil {
-		logrus.Debug("ExtractEphemeralExpiration: Video message found, checking context info")
-		if contextInfo := vid.GetContextInfo(); contextInfo != nil {
-			expiration := contextInfo.GetExpiration()
-			logrus.WithField("expiration", expiration).Debug("ExtractEphemeralExpiration: Found expiration in video message")
-			return expiration
-		}
-		logrus.Debug("ExtractEphemeralExpiration: Video message has no context info")
-	} else {
-		logrus.Debug("ExtractEphemeralExpiration: No video message found")
-	}
-
-	// Check audio message
-	logrus.Debug("ExtractEphemeralExpiration: Checking for audio message")
-	if aud := msg.GetAudioMessage(); aud != nil {
-		logrus.Debug("ExtractEphemeralExpiration: Audio message found, checking context info")
-		if contextInfo := aud.GetContextInfo(); contextInfo != nil {
-			expiration := contextInfo.GetExpiration()
-			logrus.WithField("expiration", expiration).Debug("ExtractEphemeralExpiration: Found expiration in audio message")
-			return expiration
-		}
-		logrus.Debug("ExtractEphemeralExpiration: Audio message has no context info")
-	} else {
-		logrus.Debug("ExtractEphemeralExpiration: No audio message found")
-	}
-
-	// Check document message
-	logrus.Debug("ExtractEphemeralExpiration: Checking for document message")
-	if doc := msg.GetDocumentMessage(); doc != nil {
-		logrus.Debug("ExtractEphemeralExpiration: Document message found, checking context info")
-		if contextInfo := doc.GetContextInfo(); contextInfo != nil {
-			expiration := contextInfo.GetExpiration()
-			logrus.WithField("expiration", expiration).Debug("ExtractEphemeralExpiration: Found expiration in document message")
-			return expiration
-		}
-		logrus.Debug("ExtractEphemeralExpiration: Document message has no context info")
-	} else {
-		logrus.Debug("ExtractEphemeralExpiration: No document message found")
-	}
-
-	// Check sticker message
-	logrus.Debug("ExtractEphemeralExpiration: Checking for sticker message")
-	if sticker := msg.GetStickerMessage(); sticker != nil {
-		logrus.Debug("ExtractEphemeralExpiration: Sticker message found, checking context info")
-		if contextInfo := sticker.GetContextInfo(); contextInfo != nil {
-			expiration := contextInfo.GetExpiration()
-			logrus.WithField("expiration", expiration).Debug("ExtractEphemeralExpiration: Found expiration in sticker message")
-			return expiration
-		}
-		logrus.Debug("ExtractEphemeralExpiration: Sticker message has no context info")
-	} else {
-		logrus.Debug("ExtractEphemeralExpiration: No sticker message found")
-	}
-
-	if protocolMessage := msg.GetProtocolMessage(); protocolMessage != nil {
-		if ephemeralExpiration := protocolMessage.GetEphemeralExpiration(); ephemeralExpiration != 0 {
-			logrus.WithField("expiration", ephemeralExpiration).Debug("ExtractEphemeralExpiration: Found expiration in protocol message")
-			return ephemeralExpiration
-		}
-		logrus.Debug("ExtractEphemeralExpiration: Protocol message has no expiration")
-	}
-
-	logrus.Debug("ExtractEphemeralExpiration: No expiration found in any message type, returning 0")
 	return 0
 }
+
+var reNonAlphanumeric = regexp.MustCompile(`[^a-zA-Z0-9_\-]`)
 
 // GenerateMediaFilename creates a filename for media files
 func GenerateMediaFilename(mediaType, extension, caption string) string {
@@ -458,9 +732,7 @@ func GenerateMediaFilename(mediaType, extension, caption string) string {
 	name := mediaType + "_" + timestamp
 
 	if caption != "" {
-		// Only keep alphanumeric, _, -
-		re := regexp.MustCompile(`[^a-zA-Z0-9_\-]`)
-		cleanCaption := re.ReplaceAllString(caption, "_")
+		cleanCaption := reNonAlphanumeric.ReplaceAllString(caption, "_")
 		if len(cleanCaption) > 30 {
 			cleanCaption = cleanCaption[:30]
 		}
@@ -473,11 +745,11 @@ func GenerateMediaFilename(mediaType, extension, caption string) string {
 	return name
 }
 
+var reDigits = regexp.MustCompile(`\d+`)
+
 // ExtractPhoneNumber is a helper function to extract the phone number from a JID
 func ExtractPhoneNumber(jid string) string {
-	regex := regexp.MustCompile(`\d+`)
-	// Find all matches of the pattern in the JID
-	matches := regex.FindAllString(jid, -1)
+	matches := reDigits.FindAllString(jid, -1)
 	// The first match should be the phone number
 	if len(matches) > 0 {
 		return matches[0]
@@ -778,11 +1050,6 @@ type EvtMessage struct {
 	QuotedMessage string `json:"quoted_message"`
 }
 
-type EvtReaction struct {
-	Message string `json:"message"`
-	ID      string `json:"id"`
-}
-
 // GetMessageDigestOrSignature generates HMAC signature for message
 func GetMessageDigestOrSignature(msg, key []byte) (string, error) {
 	mac := hmac.New(sha256.New, key)
@@ -833,40 +1100,119 @@ func BuildEventMessage(evt *events.Message) (message EvtMessage) {
 
 	if extendedMessage := msg.GetExtendedTextMessage(); extendedMessage != nil {
 		message.Text = extendedMessage.GetText()
-		message.RepliedId = extendedMessage.ContextInfo.GetStanzaID()
-		message.QuotedMessage = extendedMessage.ContextInfo.GetQuotedMessage().GetConversation()
 	} else if protocolMessage := msg.GetProtocolMessage(); protocolMessage != nil {
 		if editedMessage := protocolMessage.GetEditedMessage(); editedMessage != nil {
 			if extendedText := editedMessage.GetExtendedTextMessage(); extendedText != nil {
 				message.Text = extendedText.GetText()
-				message.RepliedId = extendedText.ContextInfo.GetStanzaID()
-				message.QuotedMessage = extendedText.ContextInfo.GetQuotedMessage().GetConversation()
 			}
+			if ci := ExtractContextInfo(editedMessage); ci != nil {
+				message.RepliedId = ci.GetStanzaID()
+				message.QuotedMessage = ExtractMessageTextFromProto(ci.GetQuotedMessage())
+			}
+			return message
 		}
+	}
+
+	if ci := ExtractContextInfo(msg); ci != nil {
+		message.RepliedId = ci.GetStanzaID()
+		message.QuotedMessage = ExtractMessageTextFromProto(ci.GetQuotedMessage())
 	}
 
 	return message
 }
 
-func BuildEventReaction(evt *events.Message) (waReaction EvtReaction) {
-	msg := UnwrapMessage(evt.Message)
-	if reactionMessage := msg.GetReactionMessage(); reactionMessage != nil {
-		waReaction.Message = reactionMessage.GetText()
-		waReaction.ID = reactionMessage.GetKey().GetID()
-	}
-	return waReaction
-}
-
 func BuildForwarded(evt *events.Message) bool {
 	msg := UnwrapMessage(evt.Message)
-	if extendedText := msg.GetExtendedTextMessage(); extendedText != nil {
-		return extendedText.ContextInfo.GetIsForwarded()
-	} else if protocolMessage := msg.GetProtocolMessage(); protocolMessage != nil {
-		if editedMessage := protocolMessage.GetEditedMessage(); editedMessage != nil {
-			if extendedText := editedMessage.GetExtendedTextMessage(); extendedText != nil {
-				return extendedText.ContextInfo.GetIsForwarded()
+	if ci := ExtractContextInfo(msg); ci != nil {
+		return ci.GetIsForwarded()
+	}
+	if pm := msg.GetProtocolMessage(); pm != nil {
+		if edited := pm.GetEditedMessage(); edited != nil {
+			if ci := ExtractContextInfo(edited); ci != nil {
+				return ci.GetIsForwarded()
 			}
 		}
 	}
 	return false
+}
+
+// ExtractExternalAdReply extracts Meta Ads referral/attribution metadata from
+// incoming Click-to-WhatsApp ad messages. Returns nil when no ad data is present.
+func ExtractExternalAdReply(msg *waE2E.Message) map[string]any {
+	if msg == nil {
+		return nil
+	}
+
+	ci := ExtractContextInfo(UnwrapMessage(msg))
+	if ci == nil {
+		return nil
+	}
+
+	ad := ci.GetExternalAdReply()
+	if ad == nil {
+		return nil
+	}
+
+	referral := make(map[string]any)
+
+	if v := ad.GetCtwaClid(); v != "" {
+		referral["ctwa_clid"] = v
+	}
+	if v := ad.GetSourceURL(); v != "" {
+		referral["source_url"] = v
+	}
+	if v := ad.GetSourceID(); v != "" {
+		referral["source_id"] = v
+	}
+	if v := ad.GetRef(); v != "" {
+		referral["ref"] = v
+	}
+	if v := ad.GetSourceApp(); v != "" {
+		referral["source_app"] = v
+	}
+	if v := ad.GetTitle(); v != "" {
+		referral["ad_title"] = v
+	}
+	if v := ad.GetBody(); v != "" {
+		referral["ad_body"] = v
+	}
+	if v := ad.GetThumbnailURL(); v != "" {
+		referral["thumbnail_url"] = v
+	}
+	if v := ad.GetOriginalImageURL(); v != "" {
+		referral["original_image_url"] = v
+	}
+	if v := ad.GetMediaURL(); v != "" {
+		referral["media_url"] = v
+	}
+	if ad.MediaType != nil {
+		referral["media_type"] = ad.GetMediaType().String()
+	}
+	if ad.ShowAdAttribution != nil {
+		referral["show_ad_attribution"] = ad.GetShowAdAttribution()
+	}
+	if ad.ContainsAutoReply != nil {
+		referral["contains_auto_reply"] = ad.GetContainsAutoReply()
+	}
+	if ad.AutomatedGreetingMessageShown != nil {
+		referral["automated_greeting_message_shown"] = ad.GetAutomatedGreetingMessageShown()
+	}
+	if v := ad.GetGreetingMessageBody(); v != "" {
+		referral["greeting_message_body"] = v
+	}
+	if ad.ClickToWhatsappCall != nil {
+		referral["click_to_whatsapp_call"] = ad.GetClickToWhatsappCall()
+	}
+	if v := ad.GetSourceType(); v != "" {
+		referral["source_type"] = v
+	}
+	if ad.AdType != nil {
+		referral["ad_type"] = ad.GetAdType().String()
+	}
+
+	if len(referral) == 0 {
+		return nil
+	}
+
+	return referral
 }
