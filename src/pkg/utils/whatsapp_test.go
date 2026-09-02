@@ -724,3 +724,88 @@ func TestIsForwardableStorageMessage(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatJIDStripsDeviceSuffix(t *testing.T) {
+	tests := []struct {
+		name string
+		jid  string
+		want string
+	}{
+		{
+			name: "PhoneNumberJIDWithoutDevice",
+			jid:  "6281234567890@s.whatsapp.net",
+			want: "6281234567890@s.whatsapp.net",
+		},
+		{
+			name: "PhoneNumberJIDWithDevice",
+			jid:  "6281234567890:12@s.whatsapp.net",
+			want: "6281234567890@s.whatsapp.net",
+		},
+		{
+			name: "LIDWithoutDevice",
+			jid:  "123456789012345@lid",
+			want: "123456789012345@lid",
+		},
+		{
+			// Messages sent from WhatsApp Web/Desktop carry a device suffix.
+			// whatsmeow rejects AD JIDs as a send recipient, so it must be stripped
+			// for @lid senders too, not just @s.whatsapp.net ones.
+			name: "LIDWithDevice",
+			jid:  "123456789012345:12@lid",
+			want: "123456789012345@lid",
+		},
+		{
+			name: "BareNumberGetsDefaultServer",
+			jid:  "6281234567890",
+			want: "6281234567890@s.whatsapp.net",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatJID(tt.jid)
+			if got.String() != tt.want {
+				t.Errorf("FormatJID(%q) = %q, want %q", tt.jid, got.String(), tt.want)
+			}
+			if got.Device != 0 {
+				t.Errorf("FormatJID(%q) kept device %d, want 0", tt.jid, got.Device)
+			}
+		})
+	}
+}
+
+// TestExtractContextInfoInteractiveMessage pins that quoted/forwarded context
+// on an InteractiveMessage (business/Cloud API CTA buttons) is preserved.
+// Before this case existed, BuildEventMessage/BuildForwarded silently lost
+// replied_to_id/quoted_body and the forwarded flag for these messages, even
+// though every other message type carries them through ExtractContextInfo.
+func TestExtractContextInfoInteractiveMessage(t *testing.T) {
+	t.Run("interactive message with context info", func(t *testing.T) {
+		msg := &waE2E.Message{
+			InteractiveMessage: &waE2E.InteractiveMessage{
+				Body: &waE2E.InteractiveMessage_Body{Text: proto.String("Check this out")},
+				ContextInfo: &waE2E.ContextInfo{
+					StanzaID: proto.String("ABC123"),
+				},
+			},
+		}
+		ci := ExtractContextInfo(msg)
+		if ci == nil {
+			t.Fatal("expected non-nil ContextInfo")
+		}
+		if ci.GetStanzaID() != "ABC123" {
+			t.Fatalf("got StanzaID %q, want %q", ci.GetStanzaID(), "ABC123")
+		}
+	})
+
+	t.Run("interactive message with no context info yields nil", func(t *testing.T) {
+		msg := &waE2E.Message{
+			InteractiveMessage: &waE2E.InteractiveMessage{
+				Body: &waE2E.InteractiveMessage_Body{Text: proto.String("Check this out")},
+			},
+		}
+		if ci := ExtractContextInfo(msg); ci != nil {
+			t.Fatalf("expected nil ContextInfo, got %+v", ci)
+		}
+	})
+}

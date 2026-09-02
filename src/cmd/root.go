@@ -106,11 +106,15 @@ func initEnvConfig() {
 		config.AppCORSAllowedOrigins = strings.Split(envCORSOrigins, ",")
 	}
 
-	// Web UI settings. Guard on GetString != "" rather than viper.IsSet:
-	// IsSet does not consult AutomaticEnv, so plain environment variables
-	// (e.g. in Docker) would be ignored for bool/duration keys.
+	// Web UI settings. Guarded on GetString != "" so an unset key keeps the
+	// default instead of being overwritten by the zero value of GetBool /
+	// GetDuration. viper.IsSet works equally well here (it does consult
+	// AutomaticEnv), so either guard is fine for new keys.
 	if viper.GetString("app_ui_enabled") != "" {
 		config.AppUIEnabled = viper.GetBool("app_ui_enabled")
+	}
+	if viper.GetString("mcp_enabled") != "" {
+		config.McpEnabled = viper.GetBool("mcp_enabled")
 	}
 	if viper.GetString("app_ui_auto_update") != "" {
 		config.AppUIAutoUpdate = viper.GetBool("app_ui_auto_update")
@@ -381,6 +385,12 @@ func initFlags() {
 		"ui-asset-sha256", "",
 		config.AppUIAssetSHA256,
 		`supply-chain pin: only serve the dashboard whose sha256 matches --ui-asset-sha256 <hex> (see the release's .sha256 asset)`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.McpEnabled,
+		"mcp-enabled", "",
+		config.McpEnabled,
+		`serve the MCP endpoint at /mcp --mcp-enabled <bool>`,
 	)
 
 	// Database flags
