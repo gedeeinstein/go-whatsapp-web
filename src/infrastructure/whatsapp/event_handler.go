@@ -53,6 +53,8 @@ func handler(ctx context.Context, instance *DeviceInstance, rawEvt any) {
 		handleStreamReplaced(ctx)
 	case *events.Message:
 		handleMessage(ctx, evt, chatStorageRepo, client)
+	case *events.UndecryptableMessage:
+		handleUndecryptableMessage(evt)
 	case *events.Receipt:
 		handleReceipt(ctx, evt, instance.JID(), client)
 	case *events.Archive:
@@ -84,6 +86,20 @@ func handler(ctx context.Context, instance *DeviceInstance, rawEvt any) {
 	instance.UpdateStateFromClient()
 }
 
+// handleUndecryptableMessage surfaces messages that arrived but could not be
+// decrypted. They carry no plaintext, so there is nothing to store or forward,
+// but dropping them without a trace makes the common "messages from this
+// contact never arrive" report impossible to diagnose.
+func handleUndecryptableMessage(evt *events.UndecryptableMessage) {
+	log.Warnf("Undecryptable message %s from %s (unavailable: %v, type: %q, fail mode: %q). No webhook or storage entry is produced for it.",
+		evt.Info.ID,
+		evt.Info.SourceString(),
+		evt.IsUnavailable,
+		evt.UnavailableType,
+		evt.DecryptFailMode,
+	)
+}
+
 func handleDeleteForMe(ctx context.Context, evt *events.DeleteForMe, chatStorageRepo domainChatStorage.IChatStorageRepository, deviceID string, client *whatsmeow.Client) {
 	log.Infof("Deleted message %s for %s", evt.MessageID, evt.SenderJID.String())
 
@@ -108,7 +124,7 @@ func handleDeleteForMe(ctx context.Context, evt *events.DeleteForMe, chatStorage
 
 	// Send webhook notification for delete event
 	go func(c *whatsmeow.Client) {
-		webhookCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		webhookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		if err := forwardDeleteToWebhook(webhookCtx, evt, message, deviceID, c); err != nil {
 			log.Errorf("Failed to forward delete event to webhook: %v", err)
@@ -306,7 +322,7 @@ func handleReceipt(ctx context.Context, evt *events.Receipt, deviceID string, cl
 	// Note: Receipt events are not rate limited as they are critical for message delivery status
 	if sendReceipt {
 		go func(e *events.Receipt, c *whatsmeow.Client) {
-			webhookCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			webhookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			if err := forwardReceiptToWebhook(webhookCtx, e, deviceID, c); err != nil {
 				logrus.Errorf("Failed to forward ack event to webhook: %v", err)
@@ -327,12 +343,12 @@ func handlePresence(_ context.Context, evt *events.Presence) {
 	}
 }
 
-func handleAppState(_ context.Context, evt *events.AppState, deviceID string, client *whatsmeow.Client) {
+func handleAppState(ctx context.Context, evt *events.AppState, deviceID string, client *whatsmeow.Client) {
 	log.Debugf("App state event: %+v / %+v", evt.Index, evt.SyncActionValue)
 
 	if isLabelAppState(evt) {
 		go func(e *events.AppState, c *whatsmeow.Client) {
-			webhookCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			webhookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			if err := forwardLabelAppStateToWebhook(webhookCtx, e, deviceID, c); err != nil {
 				logrus.Errorf("Failed to forward label appstate event to webhook: %v", err)
@@ -366,7 +382,7 @@ func handleGroupInfo(ctx context.Context, evt *events.GroupInfo, deviceID string
 
 	// Forward group info event to webhook
 	go func(e *events.GroupInfo, c *whatsmeow.Client) {
-		webhookCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		webhookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		if err := forwardGroupInfoToWebhook(webhookCtx, e, deviceID, c); err != nil {
 			logrus.Errorf("Failed to forward group info event to webhook: %v", err)
