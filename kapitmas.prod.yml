@@ -11,17 +11,35 @@ services:
     container_name: kapitmas_whatsapp_go
     restart: "on-failure"
     ports:
-      - "3003:3003"
+      - "3003:3000"
     networks:
       - go_kapitmas
     env_file:
       - src/.env
+    environment:
+      - APP_PORT=3000
+      - APP_DEBUG=true
+      # - APP_BASIC_AUTH="kapitmas:KptKpt12000*,gedeadi:NptNpt14000*"
+
     volumes:
       # Persist WhatsApp + chat DBs; entrypoint chowns for gowauser (uid 20001, gid 20000) on start.
-      - ./storages:/app/storages
+      # - ./storages:/app/storages
       - ./statics:/app/statics
+      - ./whatsapp_data:/app/storages
+
+    command:
+      - rest
+      - --basic-auth=admin:admin
+      - --port=3000
+      - --debug=true
+      - --os=Chrome
+      - --account-validation=false
     # volumes:
     #   - ./whatsapp_data:/app/storages
 networks:
   go_kapitmas:
     driver: bridge
+
+volumes:
+  storages:
+  statics:
