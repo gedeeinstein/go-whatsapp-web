@@ -538,14 +538,11 @@ paths:
       operationId: loginDevice
       tags:
         - device
-      summary: Reserved device QR login route (not implemented)
-      deprecated: true
-      description: |
-        This route is registered, but the current usecase returns
-        "device login per ID is not implemented yet".
-
-        To pair a specific device slot today, call `GET /app/login` with
-        `X-Device-Id: <device_id>` or `?device_id=<device_id>`.
+      summary: Login a device with QR code
+      description: >-
+        Start QR pairing for a specific device slot and return a link to the QR
+        image to scan. Equivalent to `GET /app/login` with
+        `X-Device-Id: <device_id>`, with the device taken from the path instead.
       parameters:
         - name: device_id
           in: path
@@ -554,6 +551,12 @@ paths:
             type: string
           description: Device ID
       responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceLoginResponse'
         '404':
           description: Device not found
           content:
@@ -561,7 +564,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorNotFound'
         '500':
-          description: Not implemented by the current usecase
+          description: Internal Server Error
           content:
             application/json:
               schema:
@@ -572,14 +575,11 @@ paths:
       operationId: loginDeviceWithCode
       tags:
         - device
-      summary: Reserved device pairing-code login route (not implemented)
-      deprecated: true
-      description: |
-        This route is registered, but the current usecase returns
-        "device login with code is not implemented yet".
-
-        To pair a specific device slot today, call `GET /app/login-with-code`
-        with `X-Device-Id: <device_id>` or `?device_id=<device_id>`.
+      summary: Login a device with pairing code
+      description: >-
+        Start pairing-code login for a specific device slot and return the code to
+        enter on the phone. Equivalent to `GET /app/login-with-code` with
+        `X-Device-Id: <device_id>`, with the device taken from the path instead.
       parameters:
         - name: device_id
           in: path
@@ -595,6 +595,12 @@ paths:
           example: '628912344551'
           description: Phone number to pair with
       responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceLoginWithCodeResponse'
         '404':
           description: Device not found
           content:
@@ -602,7 +608,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorNotFound'
         '500':
-          description: Not implemented by the current usecase
+          description: Internal Server Error
           content:
             application/json:
               schema:
@@ -1304,6 +1310,10 @@ paths:
                   type: boolean
                   example: false
                   description: Compress image
+                hd:
+                  type: boolean
+                  example: true
+                  description: Send a high-definition image rendition (maximum edge 2560px). Overrides compress when true.
                 duration:
                   type: integer
                   example: 86400
@@ -1549,6 +1559,10 @@ paths:
                   type: boolean
                   example: false
                   description: Compress video
+                hd:
+                  type: boolean
+                  example: true
+                  description: Send an H.264 8-bit YUV 4:2:0 high-definition video rendition at CRF 23, capped at 1280x1280 while preserving aspect ratio and avoiding upscaling. Overrides compress when true.
                 gif_playback:
                   type: boolean
                   example: false
@@ -2110,6 +2124,56 @@ paths:
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendResponse'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBadRequest'
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorInternalServer'
+  /message/{message_id}/played:
+    post:
+      operationId: markMessagePlayed
+      tags:
+        - message
+      summary: Mark an audio message as played
+      description: >-
+        Sends WhatsApp's played receipt for an incoming audio message or voice
+        note. The message must exist in the active device's chat storage and
+        belong to the supplied chat.
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - in: path
+          name: message_id
+          schema:
+            type: string
+          required: true
+          description: Message ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone:
+                  type: string
+                  example: '62819273192397132@s.whatsapp.net'
+                  description: Phone number or group JID containing the audio message
+              required:
+                - phone
+      responses:
+        '200':
+          description: Played receipt sent
           content:
             application/json:
               schema:
@@ -3598,6 +3662,54 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorInternalServer'
 
+  /newsletter/messages/{server_id}/download:
+    get:
+      operationId: downloadNewsletterMessageMedia
+      tags:
+        - newsletter
+      summary: Download media from a newsletter message
+      description: |
+        Fetches one newsletter message directly from WhatsApp by server ID,
+        downloads its media to the server's statics directory, and returns the
+        saved file metadata and public URL. Supported media types are images,
+        videos, video notes, audio, documents, and stickers.
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - name: server_id
+          in: path
+          required: true
+          description: Newsletter message server ID returned by GET /newsletter/messages
+          schema:
+            type: integer
+            minimum: 1
+          example: 8872
+        - name: newsletter_id
+          in: query
+          required: true
+          description: Newsletter JID containing the message
+          schema:
+            type: string
+          example: '120363024512399999@newsletter'
+      responses:
+        '200':
+          description: Media downloaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewsletterMediaDownloadResponse'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBadRequest'
+        '500':
+          description: Message lookup or media download failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorInternalServer'
+
   /chatwoot/sync:
     post:
       operationId: chatwootSyncHistory
@@ -4511,6 +4623,51 @@ components:
             is_logged_in:
               type: boolean
               example: true
+    DeviceLoginResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          example: SUCCESS
+        message:
+          type: string
+          example: Login success
+        status:
+          type: integer
+          example: 200
+        results:
+          type: object
+          properties:
+            device_id:
+              type: string
+              example: 'my-device-id'
+            qr_link:
+              type: string
+              example: 'http://localhost:3000/statics/images/qrcode/scan-qr-b0b7bb43-9a22-455a-814f-5a225c743310.png'
+            qr_duration:
+              type: integer
+              example: 30
+    DeviceLoginWithCodeResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          example: SUCCESS
+        message:
+          type: string
+          example: Login with code started
+        status:
+          type: integer
+          example: 200
+        results:
+          type: object
+          properties:
+            device_id:
+              type: string
+              example: 'my-device-id'
+            pair_code:
+              type: string
+              example: ABCD-1234
     DeviceInfo:
       type: object
       properties:
@@ -4881,6 +5038,52 @@ components:
         text:
           type: string
           example: "Hello from the channel!"
+    NewsletterMediaDownloadResponse:
+      type: object
+      properties:
+        status:
+          type: integer
+          example: 200
+        code:
+          type: string
+          example: SUCCESS
+        message:
+          type: string
+          example: Media downloaded successfully
+        results:
+          type: object
+          properties:
+            server_id:
+              type: integer
+              example: 8872
+            message_id:
+              type: string
+              example: ACBD7F85529AAD63FAF376F622351D14
+            status:
+              type: string
+              example: Media downloaded successfully to statics/media/120363024512399999/2026-08-28/image.jpg
+            media_type:
+              type: string
+              enum: [image, video, video_note, audio, document, sticker]
+              example: image
+            mime_type:
+              type: string
+              example: image/jpeg
+            filename:
+              type: string
+              example: image.jpg
+            file_path:
+              type: string
+              description: Local server path where the downloaded media was saved
+              example: statics/media/120363024512399999/2026-08-28/image.jpg
+            file_url:
+              type: string
+              description: Public URL for the saved media file
+              example: http://localhost:3000/statics/media/120363024512399999/2026-08-28/image.jpg
+            file_size:
+              type: integer
+              format: int64
+              example: 524288
     MyListContactsResponse:
       type: object
       properties:
@@ -5134,6 +5337,16 @@ components:
           type: string
           example: '6289685028129@s.whatsapp.net'
           description: Sender JID
+        sender_display_name:
+          type: string
+          example: 'Saved Contact'
+          description: >-
+            Human-readable sender label resolved dynamically when this response is produced, not stored with the message.
+            For other senders, it prefers the saved contact full name, then the stored contact push name, business name,
+            JID user part, and raw JID. For the active account, it prefers the device display name (falling back to the
+            stored account push name), account JID user part, account JID, sender JID user part, and raw sender JID.
+            A contact rename can therefore change the label returned for historical messages. `sender_jid` remains the
+            stable sender identifier.
         content:
           type: string
           example: 'Hello, how are you?'
@@ -5198,6 +5411,16 @@ components:
           type: string
           example: '628123456789@s.whatsapp.net'
           description: JID of the user who reacted
+        sender_display_name:
+          type: string
+          example: 'Saved Contact'
+          description: >-
+            Human-readable sender label resolved dynamically when this response is produced, not stored with the reaction.
+            For other senders, it prefers the saved contact full name, then the stored contact push name, business name,
+            JID user part, and raw JID. For the active account, it prefers the device display name (falling back to the
+            stored account push name), account JID user part, account JID, sender JID user part, and raw sender JID.
+            A contact rename can therefore change the label returned for historical reactions. `sender_jid` remains the
+            stable sender identifier.
         is_from_me:
           type: boolean
           example: false

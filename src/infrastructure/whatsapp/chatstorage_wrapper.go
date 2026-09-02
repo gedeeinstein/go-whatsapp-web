@@ -103,6 +103,14 @@ func (r *deviceChatStorage) GetMessageByIDAndDevice(deviceID, id string) (*domai
 	return r.base.GetMessageByIDAndDevice(targetDeviceID, id)
 }
 
+func (r *deviceChatStorage) GetMessageByIDChatAndDevice(deviceID, chatJID, id string) (*domainChatStorage.Message, error) {
+	targetDeviceID := deviceID
+	if targetDeviceID == "" {
+		targetDeviceID = r.deviceID
+	}
+	return r.base.GetMessageByIDChatAndDevice(targetDeviceID, chatJID, id)
+}
+
 func (r *deviceChatStorage) GetMessageEdits(originalMessageID, deviceID string) ([]*domainChatStorage.MessageEdit, error) {
 	targetDeviceID := deviceID
 	if targetDeviceID == "" {
@@ -237,6 +245,37 @@ func (r *deviceChatStorage) StoreSentMessageWithContext(ctx context.Context, mes
 		ctx = ContextWithDevice(ctx, NewDeviceInstance(r.deviceID, nil, nil))
 	}
 	return r.base.StoreSentMessageWithContext(ctx, messageID, senderJID, recipientJID, content, timestamp, msg)
+}
+
+func (r *deviceChatStorage) UpsertPollDefinition(definition *domainChatStorage.PollDefinition) error {
+	if definition != nil && definition.DeviceID == "" {
+		definition.DeviceID = r.deviceID
+	}
+	return r.base.UpsertPollDefinition(definition)
+}
+
+func (r *deviceChatStorage) GetPollDefinition(deviceID, chatJID, pollMessageID string) (*domainChatStorage.PollDefinition, error) {
+	targetDeviceID := deviceID
+	if targetDeviceID == "" {
+		targetDeviceID = r.deviceID
+	}
+	return r.base.GetPollDefinition(targetDeviceID, chatJID, pollMessageID)
+}
+
+func (r *deviceChatStorage) GetPollDefinitionByIDAndDevice(deviceID, pollMessageID string) (*domainChatStorage.PollDefinition, error) {
+	targetDeviceID := deviceID
+	if targetDeviceID == "" {
+		targetDeviceID = r.deviceID
+	}
+	return r.base.GetPollDefinitionByIDAndDevice(targetDeviceID, pollMessageID)
+}
+
+func (r *deviceChatStorage) AppendPollOption(deviceID, chatJID, pollMessageID string, option domainChatStorage.PollOption) error {
+	targetDeviceID := deviceID
+	if targetDeviceID == "" {
+		targetDeviceID = r.deviceID
+	}
+	return r.base.AppendPollOption(targetDeviceID, chatJID, pollMessageID, option)
 }
 
 func (r *deviceChatStorage) GetChatMessageCount(chatJID string) (int64, error) {
