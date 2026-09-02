@@ -8,3 +8,5 @@
 .env.test
 .env.production
 # Keep docker/ in context so the image can COPY entrypoint.sh (see docker/golang.Dockerfile).
+storages
+statics
