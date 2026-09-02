@@ -26,14 +26,21 @@ type IChatStorageRepository interface {
 	StoreMessage(message *Message) error
 	StoreMessageEdit(edit *MessageEdit) error
 	StoreMessagesBatch(messages []*Message) error
-	GetMessageByID(id string) (*Message, error)                    // New method for efficient ID-only search
-	GetMessageByIDAndDevice(deviceID, id string) (*Message, error) // Device-scoped ID lookup for device-isolated flows
+	GetMessageByID(id string) (*Message, error)                                 // New method for efficient ID-only search
+	GetMessageByIDAndDevice(deviceID, id string) (*Message, error)              // Device-scoped ID lookup for device-isolated flows
+	GetMessageByIDChatAndDevice(deviceID, chatJID, id string) (*Message, error) // Full storage identity lookup for chat-scoped flows
 	GetMessageEdits(originalMessageID, deviceID string) ([]*MessageEdit, error)
 	GetMessages(filter *MessageFilter) ([]*Message, error)
 	SearchMessages(deviceID, chatJID, searchText string, limit int) ([]*Message, error) // Database-level search with device isolation
 	DeleteMessage(id, chatJID string) error
 	DeleteMessageByDevice(deviceID, id, chatJID string) error
 	StoreSentMessageWithContext(ctx context.Context, messageID string, senderJID string, recipientJID string, content string, timestamp time.Time, msg *waE2E.Message) error
+
+	// Poll definition operations
+	UpsertPollDefinition(definition *PollDefinition) error
+	GetPollDefinition(deviceID, chatJID, pollMessageID string) (*PollDefinition, error)
+	GetPollDefinitionByIDAndDevice(deviceID, pollMessageID string) (*PollDefinition, error)
+	AppendPollOption(deviceID, chatJID, pollMessageID string, option PollOption) error
 
 	// Chatwoot correlation operations
 	UpsertChatwootMessageLink(link *ChatwootMessageLink) error
