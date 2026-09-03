@@ -19,7 +19,6 @@ services:
     environment:
       - APP_PORT=3000
       - APP_DEBUG=true
-      # - APP_BASIC_AUTH="kapitmas:KptKpt12000*,gedeadi:NptNpt14000*"
 
     volumes:
       # Persist WhatsApp + chat DBs; entrypoint chowns for gowauser (uid 20001, gid 20000) on start.
