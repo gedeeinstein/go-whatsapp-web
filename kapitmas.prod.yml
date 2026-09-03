@@ -8,6 +8,7 @@ services:
     build:
       context: .
       dockerfile: ./docker/golang.Dockerfile
+    image: gedeadisurya/go-whatsapp-multi:latest
     container_name: kapitmas_whatsapp_go
     restart: "on-failure"
     ports:
@@ -19,7 +20,6 @@ services:
     environment:
       - APP_PORT=3000
       - APP_DEBUG=true
-      # - APP_BASIC_AUTH="kapitmas:KptKpt12000*,gedeadi:NptNpt14000*"
 
     volumes:
       # Persist WhatsApp + chat DBs; entrypoint chowns for gowauser (uid 20001, gid 20000) on start.
