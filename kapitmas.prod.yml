@@ -8,6 +8,7 @@ services:
     build:
       context: .
       dockerfile: ./docker/golang.Dockerfile
+    image: gedeadisurya/go-whatsapp-multi:latest
     container_name: kapitmas_whatsapp_go
     restart: "on-failure"
     ports:
