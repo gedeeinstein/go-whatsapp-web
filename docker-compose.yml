@@ -1,5 +1,6 @@
 services:
   whatsapp_go:
+    image: gedeadisurya/go-whatsapp-multi:latest
     logging:
       driver: "json-file"
       options:
