@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"google.golang.org/protobuf/proto"
 )
@@ -137,11 +138,6 @@ func TestExtractChatwootContactInfo(t *testing.T) {
 		// messages collapse into one conversation). With no client in context
 		// getGroupName returns "", so Name falls back to "Group: <extracted phone>".
 		groupJID := "120363999000111@g.us"
-		// Seed the cache with an empty name so the fallback is deterministic even
-		// if another test in this package has set a global WhatsApp client. A
-		// cached "" still flows to the "Group: <phone>" fallback. This is a fresh
-		// entry (TTL in the future), so no timing dependency is introduced.
-		setCachedGroupName(groupJID, "")
 		info, err := extractChatwootContactInfo(ctx, map[string]any{
 			"from":      "628111@s.whatsapp.net",
 			"chat_id":   groupJID,
@@ -169,7 +165,6 @@ func TestExtractChatwootContactInfo(t *testing.T) {
 
 	t.Run("group fallback prefix even when from_name empty", func(t *testing.T) {
 		groupJID := "120363222333444@g.us"
-		setCachedGroupName(groupJID, "")
 		info, err := extractChatwootContactInfo(ctx, map[string]any{
 			"from":    "628111@s.whatsapp.net",
 			"chat_id": groupJID,
@@ -1002,19 +997,20 @@ func TestIsEventWhitelisted(t *testing.T) {
 // expiry timing. setCachedGroupName stores with a future TTL, so a subsequent load
 // returns (name, true); an unknown key returns ("", false).
 func TestGroupNameCache(t *testing.T) {
+	const groupNameCacheTestDevice = "15550000001@s.whatsapp.net"
 	t.Run("store then load returns cached name", func(t *testing.T) {
 		// Use a JID unlikely to collide with other tests so a leftover entry from a
 		// prior run can't mask a regression.
 		jid := "cachetest-store@g.us"
-		setCachedGroupName(jid, "My Group")
-		name, ok := getCachedGroupName(jid)
+		setCachedGroupName(groupNameCacheTestDevice, jid, "My Group")
+		name, ok := getCachedGroupName(groupNameCacheTestDevice, jid)
 		if !ok || name != "My Group" {
 			t.Fatalf("expected ('My Group', true), got (%q, %v)", name, ok)
 		}
 	})
 
 	t.Run("unknown key returns empty and false", func(t *testing.T) {
-		name, ok := getCachedGroupName("cachetest-missing@g.us")
+		name, ok := getCachedGroupName(groupNameCacheTestDevice, "cachetest-missing@g.us")
 		if ok || name != "" {
 			t.Fatalf("expected ('', false) for unknown key, got (%q, %v)", name, ok)
 		}
@@ -1024,8 +1020,8 @@ func TestGroupNameCache(t *testing.T) {
 		// Storing an empty name is meaningful (it records "we tried and got nothing")
 		// — load must still return ok=true so callers don't re-fetch.
 		jid := "cachetest-empty@g.us"
-		setCachedGroupName(jid, "")
-		name, ok := getCachedGroupName(jid)
+		setCachedGroupName(groupNameCacheTestDevice, jid, "")
+		name, ok := getCachedGroupName(groupNameCacheTestDevice, jid)
 		if !ok || name != "" {
 			t.Fatalf("expected ('', true) for empty cached name, got (%q, %v)", name, ok)
 		}
@@ -1054,7 +1050,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 			},
 		}
 		want := "Promo\nConfira nossa oferta\nEquipe Vendas\n🔗 Visitar site: https://example.com"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -1073,7 +1069,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 			},
 		}
 		want := "📞 Ligar agora: +5511999999999"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -1094,7 +1090,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 			},
 		}
 		want := "[cta_url] Visitar site"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -1113,7 +1109,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 			},
 		}
 		want := "[single_select] Choose an option"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -1129,7 +1125,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 			},
 		}
 		want := "[review_and_pay]"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -1148,7 +1144,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 			},
 		}
 		want := "📋 Copy: SAVE10"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -1161,7 +1157,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 			},
 		}
 		want := "Promo\nOnly this week"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -1176,7 +1172,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 			},
 		}
 		want := "Summer sale\nNew arrivals, 20% off"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -1195,7 +1191,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 			},
 		}
 		want := "[single_select] Choose a plan"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -1225,7 +1221,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 			},
 		}
 		want := "Check our products\nCard 1: Shoes\n🔗 Buy: https://example.com/shoes"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -1233,48 +1229,8 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 	t.Run("no header, body, footer, or buttons yields generic sentinel", func(t *testing.T) {
 		im := &waE2E.InteractiveMessage{}
 		want := "Interactive message"
-		if got := formatInteractiveMessageSummary(im); got != want {
+		if got := utils.FormatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
-		}
-	})
-}
-
-// TestExtractStructuredMessageContentInteractive covers the data["interactive"]
-// dispatch branch in extractStructuredMessageContent. Unlike the other
-// structured branches in this file, buildOtherMessageTypes pre-renders
-// InteractiveMessage to a plain string at construction time (via
-// formatInteractiveMessageSummary) instead of storing the raw proto, so this
-// value survives the JSON round-trip the Chatwoot forward retry queue
-// performs — see the comment at that call site in event_message.go.
-func TestExtractStructuredMessageContentInteractive(t *testing.T) {
-	t.Run("pre-rendered string is returned as-is", func(t *testing.T) {
-		got := extractStructuredMessageContent(map[string]any{"interactive": "Hello"})
-		if got != "Hello" {
-			t.Fatalf("got %q", got)
-		}
-	})
-
-	t.Run("non-string value falls through to empty string", func(t *testing.T) {
-		// Would only happen from a bug elsewhere (buildOtherMessageTypes
-		// always stores a string) — falling through to the caller's own
-		// placeholder logic is safer than guessing at a sentinel here.
-		got := extractStructuredMessageContent(map[string]any{"interactive": 42})
-		if got != "" {
-			t.Fatalf("got %q", got)
-		}
-	})
-
-	t.Run("empty string falls through to empty string", func(t *testing.T) {
-		got := extractStructuredMessageContent(map[string]any{"interactive": ""})
-		if got != "" {
-			t.Fatalf("got %q", got)
-		}
-	})
-
-	t.Run("nil interactive value falls through to empty string", func(t *testing.T) {
-		got := extractStructuredMessageContent(map[string]any{"interactive": nil})
-		if got != "" {
-			t.Fatalf("got %q", got)
 		}
 	})
 }

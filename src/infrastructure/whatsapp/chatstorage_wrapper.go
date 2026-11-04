@@ -91,8 +91,10 @@ func (r *deviceChatStorage) StoreMessagesBatch(messages []*domainChatStorage.Mes
 	return r.base.StoreMessagesBatch(messages)
 }
 
+// GetMessageByID is scoped to this device, like every other read on the
+// wrapper: the base lookup by ID alone can return another device's row.
 func (r *deviceChatStorage) GetMessageByID(id string) (*domainChatStorage.Message, error) {
-	return r.base.GetMessageByID(id)
+	return r.base.GetMessageByIDAndDevice(r.deviceID, id)
 }
 
 func (r *deviceChatStorage) GetMessageByIDAndDevice(deviceID, id string) (*domainChatStorage.Message, error) {
@@ -124,6 +126,14 @@ func (r *deviceChatStorage) GetMessages(filter *domainChatStorage.MessageFilter)
 		filter.DeviceID = r.deviceID
 	}
 	return r.base.GetMessages(filter)
+}
+
+func (r *deviceChatStorage) GetOldestMessageByDevice(deviceID, chatJID string) (*domainChatStorage.Message, error) {
+	targetDeviceID := deviceID
+	if targetDeviceID == "" {
+		targetDeviceID = r.deviceID
+	}
+	return r.base.GetOldestMessageByDevice(targetDeviceID, chatJID)
 }
 
 func (r *deviceChatStorage) SearchMessages(deviceID, chatJID, searchText string, limit int) ([]*domainChatStorage.Message, error) {
@@ -163,6 +173,13 @@ func (r *deviceChatStorage) GetChatwootMessageLinkByChatwootID(deviceID string, 
 		targetDeviceID = r.deviceID
 	}
 	return r.base.GetChatwootMessageLinkByChatwootID(targetDeviceID, chatwootMessageID)
+}
+
+func (r *deviceChatStorage) GetChatwootMessageLinkForReply(filter domainChatStorage.ChatwootReplyLinkFilter) (*domainChatStorage.ChatwootMessageLink, error) {
+	if filter.DeviceID == "" {
+		filter.DeviceID = r.deviceID
+	}
+	return r.base.GetChatwootMessageLinkForReply(filter)
 }
 
 func (r *deviceChatStorage) GetLatestChatwootMessageLinkByConversation(conversationID, accountID int, allowLegacyZero bool, configID int64) (*domainChatStorage.ChatwootMessageLink, error) {
@@ -238,6 +255,60 @@ func (r *deviceChatStorage) MarkChatwootForwardEventFailed(id int64, lastError s
 
 func (r *deviceChatStorage) MarkChatwootForwardEventDone(id int64) error {
 	return r.base.MarkChatwootForwardEventDone(id)
+}
+
+// Scheduled sends are keyed by the registry slot alias, which r.deviceID (a
+// storage JID once logged in) is not, so these pass device IDs through as-is.
+func (r *deviceChatStorage) CreateScheduledSend(job *domainChatStorage.ScheduledSend) error {
+	return r.base.CreateScheduledSend(job)
+}
+
+func (r *deviceChatStorage) ListScheduledSends(filter domainChatStorage.ScheduledSendFilter) ([]*domainChatStorage.ScheduledSend, error) {
+	return r.base.ListScheduledSends(filter)
+}
+
+func (r *deviceChatStorage) CountScheduledSends(filter domainChatStorage.ScheduledSendFilter) (int, error) {
+	return r.base.CountScheduledSends(filter)
+}
+
+func (r *deviceChatStorage) GetScheduledSend(deviceID, id string) (*domainChatStorage.ScheduledSend, error) {
+	return r.base.GetScheduledSend(deviceID, id)
+}
+
+func (r *deviceChatStorage) ClaimNextScheduledSend(now, leaseUntil time.Time, leaseToken string) (*domainChatStorage.ScheduledSend, error) {
+	return r.base.ClaimNextScheduledSend(now, leaseUntil, leaseToken)
+}
+
+func (r *deviceChatStorage) ClaimExpiredScheduledSend(now, leaseUntil time.Time, leaseToken string) (*domainChatStorage.ScheduledSend, error) {
+	return r.base.ClaimExpiredScheduledSend(now, leaseUntil, leaseToken)
+}
+
+func (r *deviceChatStorage) ListScheduledSendIDs() ([]string, error) {
+	return r.base.ListScheduledSendIDs()
+}
+
+func (r *deviceChatStorage) SetScheduledSendPendingAttempt(id, leaseToken, messageID string, pollSecret []byte, now time.Time) (bool, error) {
+	return r.base.SetScheduledSendPendingAttempt(id, leaseToken, messageID, pollSecret, now)
+}
+
+func (r *deviceChatStorage) ClearScheduledSendPendingMessageID(deviceID, id string) error {
+	return r.base.ClearScheduledSendPendingMessageID(deviceID, id)
+}
+
+func (r *deviceChatStorage) RetryScheduledSend(id, leaseToken, lastError string, attempts int, nextRunAt time.Time) error {
+	return r.base.RetryScheduledSend(id, leaseToken, lastError, attempts, nextRunAt)
+}
+
+func (r *deviceChatStorage) CompleteScheduledSend(id, leaseToken, status, lastMessageID string, occurrenceCount int, nextRunAt *time.Time) error {
+	return r.base.CompleteScheduledSend(id, leaseToken, status, lastMessageID, occurrenceCount, nextRunAt)
+}
+
+func (r *deviceChatStorage) FailScheduledSend(id, leaseToken, lastError string) error {
+	return r.base.FailScheduledSend(id, leaseToken, lastError)
+}
+
+func (r *deviceChatStorage) SetScheduledSendStatus(deviceID, id string, from []string, status string, nextRunAt *time.Time) (bool, error) {
+	return r.base.SetScheduledSendStatus(deviceID, id, from, status, nextRunAt)
 }
 
 func (r *deviceChatStorage) StoreSentMessageWithContext(ctx context.Context, messageID string, senderJID string, recipientJID string, content string, timestamp time.Time, msg *waE2E.Message) error {
@@ -378,6 +449,6 @@ func (r *deviceChatStorage) SetDeviceWebhookConfig(deviceID string, config *doma
 }
 
 // GetDeviceWebhookConfig retrieves the complete webhook configuration for a device.
-func (r *deviceChatStorage) GetDeviceWebhookConfig(deviceID string) (*domainChatStorage.DeviceWebhookConfig, error) {
-	return r.base.GetDeviceWebhookConfig(deviceID)
+func (r *deviceChatStorage) GetDeviceWebhookConfig(ctx context.Context, deviceID string) (*domainChatStorage.DeviceWebhookConfig, error) {
+	return r.base.GetDeviceWebhookConfig(ctx, deviceID)
 }
