@@ -46,11 +46,13 @@ var (
 	callUsecase       domainCall.ICallUsecase
 	chatUsecase       domainChat.IChatUsecase
 	sendUsecase       domainSend.ISendUsecase
+	scheduleUsecase   domainSend.IScheduleUsecase
 	userUsecase       domainUser.IUserUsecase
 	messageUsecase    domainMessage.IMessageUsecase
 	groupUsecase      domainGroup.IGroupUsecase
 	newsletterUsecase domainNewsletter.INewsletterUsecase
 	deviceUsecase     domainDevice.IDeviceUsecase
+	scheduleStop      func()
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -71,13 +73,21 @@ func init() {
 	// Initialize flags first, before any subcommands are added
 	initFlags()
 
-	// Then initialize other components
-	cobra.OnInitialize(initEnvConfig, initApp)
+	// Then initialize other components. Cobra marks the target command as called
+	// before running initializers, so `version` can skip config and storage setup.
+	cobra.OnInitialize(func() {
+		if versionCmd.CalledAs() != "" {
+			return
+		}
+		initEnvConfig()
+		initApp()
+	})
 }
 
 // initEnvConfig loads configuration from environment variables
 func initEnvConfig() {
-	fmt.Println(viper.AllSettings())
+	// Key names stay visible; secret values and URL userinfo are masked.
+	fmt.Println(utils.RedactSettings(viper.AllSettings()))
 	// Application settings
 	if envPort := viper.GetString("app_port"); envPort != "" {
 		config.AppPort = envPort
@@ -160,6 +170,9 @@ func initEnvConfig() {
 	if viper.IsSet("whatsapp_auto_download_media") {
 		config.WhatsappAutoDownloadMedia = viper.GetBool("whatsapp_auto_download_media")
 	}
+	if viper.IsSet("whatsapp_ignore_status_media") {
+		config.WhatsappIgnoreStatusMedia = viper.GetBool("whatsapp_ignore_status_media")
+	}
 	if envWebhook := viper.GetString("whatsapp_webhook"); envWebhook != "" {
 		webhook := strings.Split(envWebhook, ",")
 		config.WhatsappWebhook = webhook
@@ -183,6 +196,12 @@ func initEnvConfig() {
 			}
 		}
 		config.WhatsappWebhookIgnoreJids = jids
+	}
+	if !rootCmd.PersistentFlags().Changed("webhook-all-device-receipts") && viper.IsSet("whatsapp_webhook_all_device_receipts") {
+		config.WhatsappWebhookAllDeviceReceipts = viper.GetBool("whatsapp_webhook_all_device_receipts")
+	}
+	if viper.IsSet("whatsapp_webhook_device_merge_global") {
+		config.WhatsappWebhookDeviceMergeGlobal = viper.GetBool("whatsapp_webhook_device_merge_global")
 	}
 	if viper.IsSet("whatsapp_account_validation") {
 		config.WhatsappAccountValidation = viper.GetBool("whatsapp_account_validation")
@@ -260,6 +279,11 @@ func initEnvConfig() {
 	}
 	if envChatwootWebhookSecret := viper.GetString("chatwoot_webhook_secret"); envChatwootWebhookSecret != "" {
 		config.ChatwootWebhookSecret = envChatwootWebhookSecret
+	}
+	if viper.IsSet("chatwoot_webhook_signature_tolerance") {
+		if tolerance := viper.GetDuration("chatwoot_webhook_signature_tolerance"); tolerance > 0 {
+			config.ChatwootWebhookSignatureTolerance = tolerance
+		}
 	}
 	if envChatwootAllowedHosts := viper.GetString("chatwoot_allowed_hosts"); envChatwootAllowedHosts != "" {
 		config.ChatwootAllowedHosts = splitCommaTrimmed(envChatwootAllowedHosts)
@@ -426,6 +450,12 @@ func initFlags() {
 		config.WhatsappAutoDownloadMedia,
 		`auto download media from incoming messages --auto-download-media <true/false> | example: --auto-download-media=false`,
 	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.WhatsappIgnoreStatusMedia,
+		"ignore-status-media", "",
+		config.WhatsappIgnoreStatusMedia,
+		`ignore downloading status media --ignore-status-media <true/false> | example: --ignore-status-media=true`,
+	)
 	rootCmd.PersistentFlags().StringSliceVarP(
 		&config.WhatsappWebhook,
 		"webhook", "w",
@@ -436,7 +466,7 @@ func initFlags() {
 		&config.WhatsappWebhookSecret,
 		"webhook-secret", "",
 		config.WhatsappWebhookSecret,
-		`secure webhook request --webhook-secret <string> | example: --webhook-secret="super-secret-key"`,
+		`secure webhook request --webhook-secret <string> | example: --webhook-secret="<output of openssl rand -hex 32>"`,
 	)
 	rootCmd.PersistentFlags().BoolVarP(
 		&config.WhatsappWebhookInsecureSkipVerify,
@@ -455,6 +485,18 @@ func initFlags() {
 		"webhook-ignore-jids", "",
 		config.WhatsappWebhookIgnoreJids,
 		`comma-separated WhatsApp JIDs (or "@g.us"/"@s.whatsapp.net"/"@lid" wildcards) to skip when forwarding to webhooks --webhook-ignore-jids <list> | example: --webhook-ignore-jids="@g.us,628123456789@s.whatsapp.net"`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.WhatsappWebhookAllDeviceReceipts,
+		"webhook-all-device-receipts", "",
+		config.WhatsappWebhookAllDeviceReceipts,
+		`forward receipts from all linked devices instead of only the primary device --webhook-all-device-receipts <true/false> | example: --webhook-all-device-receipts=true`,
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&config.WhatsappWebhookDeviceMergeGlobal,
+		"webhook-device-merge-global", "",
+		config.WhatsappWebhookDeviceMergeGlobal,
+		`also deliver a device's events to the global --webhook URLs when that device has its own webhook (default: device webhook replaces the global ones) --webhook-device-merge-global <true/false> | example: --webhook-device-merge-global=true`,
 	)
 	rootCmd.PersistentFlags().BoolVarP(
 		&config.WhatsappAccountValidation,
@@ -566,6 +608,12 @@ func initFlags() {
 		config.ChatwootWebhookSecret,
 		`shared secret required for incoming Chatwoot webhooks --chatwoot-webhook-secret <string> | example: --chatwoot-webhook-secret="super-secret-key"`,
 	)
+	rootCmd.PersistentFlags().DurationVarP(
+		&config.ChatwootWebhookSignatureTolerance,
+		"chatwoot-webhook-signature-tolerance", "",
+		config.ChatwootWebhookSignatureTolerance,
+		`maximum age (and clock skew) of the timestamp on Chatwoot's signed webhooks --chatwoot-webhook-signature-tolerance <duration> | example: --chatwoot-webhook-signature-tolerance=5m`,
+	)
 	rootCmd.PersistentFlags().StringSliceVarP(
 		&config.ChatwootAllowedHosts,
 		"chatwoot-allowed-hosts", "",
@@ -629,6 +677,9 @@ func initFlags() {
 }
 
 func initChatStorage() (*sql.DB, error) {
+	if err := whatsapp.SecureSQLiteFile(config.ChatStorageURI); err != nil {
+		return nil, fmt.Errorf("prepare chat storage file: %w", err)
+	}
 	connStr := sqlite.FormatChatStorageURI(config.ChatStorageURI, config.ChatStorageEnableWAL, config.ChatStorageEnableForeignKeys)
 
 	db, err := sql.Open(sqlite.DriverName, connStr)
@@ -694,12 +745,26 @@ func initApp() {
 	appUsecase = usecase.NewAppService(chatStorageRepo, dm)
 	callUsecase = usecase.NewCallService()
 	chatUsecase = usecase.NewChatService(chatStorageRepo)
-	sendUsecase = usecase.NewSendService(appUsecase, chatStorageRepo)
+	baseSendUsecase := usecase.NewSendService(appUsecase, chatStorageRepo)
+	scheduleService := usecase.NewScheduleService(chatStorageRepo, baseSendUsecase, dm, config.PathStorages)
+	scheduleUsecase = scheduleService
+	sendUsecase = usecase.NewScheduledSendService(baseSendUsecase, scheduleService)
 	userUsecase = usecase.NewUserService(chatStorageRepo)
 	messageUsecase = usecase.NewMessageService(chatStorageRepo)
 	groupUsecase = usecase.NewGroupService()
 	newsletterUsecase = usecase.NewNewsletterService()
 	deviceUsecase = usecase.NewDeviceService(dm, appUsecase)
+	scheduleCtx, scheduleCancel := context.WithCancel(context.Background())
+	scheduleService.Start(scheduleCtx)
+	// Stop gives an in-flight scheduled send up to 10s to finish before storage
+	// closes; a send cut off later is recovered as interrupted on next boot.
+	scheduleStop = func() {
+		scheduleCancel()
+		select {
+		case <-scheduleService.Done():
+		case <-time.After(10 * time.Second):
+		}
+	}
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

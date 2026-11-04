@@ -6,9 +6,12 @@ import (
 	"errors"
 	"image"
 	"image/jpeg"
+	"image/png"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	domainChatStorage "github.com/aldinokemal/go-whatsapp-web-multidevice/domains/chatstorage"
@@ -116,6 +119,36 @@ func TestPrepareImageForSendSelectsRequestedQuality(t *testing.T) {
 	}
 }
 
+func TestPrepareImageForSendCompressCapsNarrowSource(t *testing.T) {
+	narrow := image.NewRGBA(image.Rect(0, 0, 1, 8192))
+	got, processed := prepareImageForSend(narrow, true, false)
+	require.True(t, processed)
+	require.LessOrEqual(t, got.Bounds().Dx(), compressedImageMaxEdge)
+	require.LessOrEqual(t, got.Bounds().Dy(), hdImageMaxEdge)
+	require.LessOrEqual(t, got.Bounds().Dx()*got.Bounds().Dy(), compressedImageMaxEdge*hdImageMaxEdge)
+
+	photo := image.NewRGBA(image.Rect(0, 0, 3000, 1500))
+	got, processed = prepareImageForSend(photo, true, false)
+	require.True(t, processed)
+	assert.Equal(t, 600, got.Bounds().Dx())
+	assert.Equal(t, 300, got.Bounds().Dy())
+
+	// A portrait screenshot keeps the 600 px width, as the fixed-width resize did.
+	portrait := image.NewRGBA(image.Rect(0, 0, 1080, 2340))
+	got, processed = prepareImageForSend(portrait, true, false)
+	require.True(t, processed)
+	assert.Equal(t, 600, got.Bounds().Dx())
+	assert.Equal(t, 1300, got.Bounds().Dy())
+}
+
+func TestVideoThumbnailFFmpegArgsFitInsideBox(t *testing.T) {
+	args := videoThumbnailFFmpegArgs("clip.mp4", "frame.png")
+	assert.Contains(t, args, "scale=100:512:force_original_aspect_ratio=decrease")
+	assert.NotContains(t, args, "scale=100:-1")
+	joined := strings.Join(args, " ")
+	assert.NotContains(t, joined, "100:0")
+}
+
 func TestBuildHDVideoFFmpegArgsUses1280BoundingBoxWithoutUpscaling(t *testing.T) {
 	want := []string{
 		"-i", "input.mp4",
@@ -132,6 +165,49 @@ func TestBuildHDVideoFFmpegArgsUses1280BoundingBoxWithoutUpscaling(t *testing.T)
 	}
 
 	assert.Equal(t, want, buildHDVideoFFmpegArgs("input.mp4", "output.mp4"))
+}
+
+func TestBuildStickerWebPFFmpegArgs(t *testing.T) {
+	want := []string{
+		"-y",
+		"-i", "input.png",
+		"-vcodec", "libwebp",
+		"-lossless", "0",
+		"-compression_level", "6",
+		"-q:v", "60",
+		"-preset", "default",
+		"-loop", "0",
+		"-an",
+		"output.webp",
+	}
+
+	got := buildStickerWebPFFmpegArgs("input.png", "output.webp")
+	assert.Equal(t, want, got)
+	assert.NotContains(t, got, "-vsync", "ffmpeg 9 removed -vsync; passing it fails the whole conversion")
+}
+
+func TestBuildStickerWebPFFmpegArgsConvertWithInstalledFFmpeg(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+
+	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "sticker.png")
+	webpPath := filepath.Join(dir, "sticker.webp")
+
+	pngFile, err := os.Create(pngPath)
+	require.NoError(t, err)
+	require.NoError(t, png.Encode(pngFile, image.NewNRGBA(image.Rect(0, 0, 4, 4))))
+	require.NoError(t, pngFile.Close())
+
+	output, err := exec.Command("ffmpeg", buildStickerWebPFFmpegArgs(pngPath, webpPath)...).CombinedOutput()
+	require.NoError(t, err, string(output))
+
+	webp, err := os.ReadFile(webpPath)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(webp), 12)
+	assert.Equal(t, "RIFF", string(webp[0:4]))
+	assert.Equal(t, "WEBP", string(webp[8:12]))
 }
 
 func TestBuildVideoTranscodeArgsSelectsRequestedQuality(t *testing.T) {
@@ -494,7 +570,7 @@ func TestSendForwardMessageNotFound(t *testing.T) {
 
 func TestForwardDurationOptionExplicitZero(t *testing.T) {
 	zero := 0
-	got := forwardDurationOption(serviceSend{}, domainSend.ForwardRequest{
+	got := forwardDurationOption(context.Background(), serviceSend{}, domainSend.ForwardRequest{
 		Phone:    "628123456789@s.whatsapp.net",
 		Duration: &zero,
 	})
@@ -527,4 +603,58 @@ func TestSendForwardUnsupportedType(t *testing.T) {
 	if genericErr.Error() != utils.ErrUnsupportedForwardType {
 		t.Fatalf("error = %q, want %q", genericErr.Error(), utils.ErrUnsupportedForwardType)
 	}
+}
+
+// A sender persisted before senders were normalised on the way in still carries
+// AD/device identity. The quote reader must not trust it: a device-suffixed JID
+// matches no participant of a chat, so the recipient cannot attribute the quote.
+func TestMergeReplyContextNormalizesALegacyDeviceSuffixedSender(t *testing.T) {
+	replyID := "3EB089B9D6ADD58153C561"
+	repo := &replyMessageRepo{
+		message: &domainChatStorage.Message{
+			Sender:  "628123456789:32@s.whatsapp.net", // written before the fix
+			Content: "quoted message body",
+		},
+	}
+	service := serviceSend{chatStorageRepo: repo}
+
+	ctx := whatsapp.ContextWithDevice(context.Background(),
+		whatsapp.NewDeviceInstance("6289605618749@s.whatsapp.net", nil, nil))
+	got := service.mergeReplyContext(ctx, &waE2E.ContextInfo{}, &replyID)
+
+	if got.GetParticipant() != "628123456789@s.whatsapp.net" {
+		t.Fatalf("expected the stored sender to be normalized, got %q", got.GetParticipant())
+	}
+}
+
+// A stored value that will not parse must pass through rather than be dropped:
+// a wrong participant is recoverable, an empty one loses the quote entirely.
+func TestMergeReplyContextPassesThroughAnUnparseableSender(t *testing.T) {
+	replyID := "3EB089B9D6ADD58153C561"
+	repo := &replyMessageRepo{
+		message: &domainChatStorage.Message{Sender: "not-a-jid", Content: "body"},
+	}
+	service := serviceSend{chatStorageRepo: repo}
+
+	ctx := whatsapp.ContextWithDevice(context.Background(),
+		whatsapp.NewDeviceInstance("6289605618749@s.whatsapp.net", nil, nil))
+	got := service.mergeReplyContext(ctx, &waE2E.ContextInfo{}, &replyID)
+
+	if got.GetParticipant() != "not-a-jid" {
+		t.Fatalf("expected the raw sender to survive, got %q", got.GetParticipant())
+	}
+}
+
+func TestWithAllowReshare(t *testing.T) {
+	assert.Nil(t, withAllowReshare(nil, false))
+
+	got := withAllowReshare(nil, true)
+	require.NotNil(t, got)
+	assert.True(t, got.GetFeatureEligibilities().GetCanBeReshared())
+
+	existing := &waE2E.ContextInfo{MentionedJID: []string{"628123456789@s.whatsapp.net"}}
+	got = withAllowReshare(existing, true)
+	assert.Same(t, existing, got)
+	assert.Equal(t, []string{"628123456789@s.whatsapp.net"}, got.GetMentionedJID())
+	assert.True(t, got.GetFeatureEligibilities().GetCanBeReshared())
 }
